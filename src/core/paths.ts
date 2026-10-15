@@ -7,7 +7,7 @@
  * written rarely. Writes are atomic (temp + rename, DAT-02 single-writer),
  * so readers never observe partial files.
  */
-import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
 import { basename, dirname, join, resolve } from "node:path"
 
@@ -192,6 +192,24 @@ export function clearReadCache(): void {
 
 export function ensureDir(path: string): void {
   mkdirSync(path, { recursive: true })
+}
+
+/** Seeded into every memory directory so runtime-only files stay out of git. */
+const MEMORY_GITIGNORE = "audit.jsonl\n"
+
+/**
+ * Ensure a memory directory exists and seed its `.gitignore`. Only runtime
+ * telemetry (the audit log) is ignored — deliberate memory (entries, lessons,
+ * guardrails, config) stays committable so project memory can be shared.
+ */
+export function ensureMemoryDir(dir: string): void {
+  mkdirSync(dir, { recursive: true })
+  const ignore = join(dir, ".gitignore")
+  try {
+    if (!existsSync(ignore)) writeFileSync(ignore, MEMORY_GITIGNORE)
+  } catch {
+    // best effort — a missing .gitignore must never break memory writes
+  }
 }
 
 /** Remove a file if it exists — never throws for a missing file. */

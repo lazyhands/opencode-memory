@@ -13,6 +13,7 @@
 import { appendEventText, buildRecommendations, computeStats, contentId, createAuditEvent, entryRef, parseEvents, pruneEvents, serializeEvents } from "./core/audit.ts"
 import type { AuditEvent, AuditEventType, AuditStats } from "./core/audit.ts"
 import {
+  CONFIG_FIELDS,
   CONFIG_FIELD_PATHS,
   loadConfig,
   readFieldValue,
@@ -43,6 +44,7 @@ import {
   auditPath,
   canonicalProjectRoot,
   configPath,
+  ensureMemoryDir,
   globalMemoryDir,
   guardrailsPath,
   issuesPath,
@@ -300,6 +302,8 @@ export interface StatusData {
     lessons: number
     threads: { open: number; fixed: number; verifying: number; regressed: number; closed: number; active: string[] }
     guardrails: Record<string, number>
+    /** Open guardrails that already failed again (unresolved reoccurrences). */
+    reoccurring: number
   }
   audit: { injections: number; sessions: number; failures: number; resolves: number; searches: number }
   lint: string[]
@@ -352,6 +356,22 @@ export interface ConfigView {
   values: Record<string, unknown>
   sources: Record<string, string>
   warnings: string[]
+  /** Field catalog (path/type/description) so clients can build editors. */
+  fields: { path: string; type: string; description: string }[]
+}
+
+/** One guardrail record as seen by the TUI (full record minus internals). */
+export interface GuardrailDTO {
+  id: string
+  fingerprint: string
+  tool: string
+  state: "open" | "resolved" | "dismissed"
+  mode: "inherit" | "warn" | "block"
+  count: number
+  firstSeen: string
+  lastSeen: string
+  errorSample: string
+  fix?: { input: string; at: string } | undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -388,8 +408,17 @@ export interface MemoryRuntime {
   toolOutcome(input: ToolOutcomeInput): Promise<ToolOutcomeResult>
   statusData(loaded: LoadedWorkspace): StatusData
   configView(loaded: LoadedWorkspace): ConfigView
-  setConfigValue(input: { scope: "global" | "project"; key: string; value: unknown }): Promise<ConfigView>
-  setGuardrailMode(input: { id: string; mode: string }): Promise<{ id: string; mode: string; state: string }>
+  setConfigValue(input: {
+    scope: "global" | "project"
+    key: string
+    value: unknown
+    sessionID?: string | undefined
+  }): Promise<ConfigView>
+  setGuardrailMode(input: {
+    id: string
+    mode: string
+    sessionID?: string | undefined
+  }): Promise<{ id: string; mode: string; state: string }>
   searchMemory(loaded: LoadedWorkspace, query: string, target?: SearchTarget, limit?: number): SearchHitDTO[]
   auditEvents(loaded: LoadedWorkspace): AuditEvent[]
   auditStats(loaded: LoadedWorkspace): AuditStats
@@ -397,6 +426,8 @@ export interface MemoryRuntime {
   injectionLog(loaded: LoadedWorkspace, options?: { sessionID?: string | undefined; limit?: number | undefined }): InjectionLogEntry[]
   /** Effectiveness table + recommendations, filtered by scope (TUI tab). */
   effectivenessData(loaded: LoadedWorkspace, scope?: "all" | "project" | "personality"): EffectivenessData
+  /** All guardrail records as client DTOs (TUI guardrail actions). */
+  guardrailList(loaded: LoadedWorkspace): GuardrailDTO[]
   labelsFor(loaded: LoadedWorkspace): Map<string, string>
   recommendations(loaded: LoadedWorkspace, stats: AuditStats): string[]
 }
@@ -573,7 +604,8 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     }
   }
 
-  function commit(loaded: LoadedWorkspace, scope: ChangedScope): void {
+  function commit(loaded: Pick<LoadedWorkspace, "projectRoot" | "projectDir">, scope: ChangedScope): void {
+    ensureMemoryDir(loaded.projectDir)
     epoch++
     emit("changed", { scope, projectRoot: loaded.projectRoot })
   }
@@ -581,6 +613,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
   function writeAudit(loaded: LoadedWorkspace, type: AuditEventType, fields: Record<string, unknown>): void {
     if (!loaded.config.audit.enabled) return
     try {
+      ensureMemoryDir(loaded.projectDir)
       const at = now()
       const text = readText(loaded.files.audit)
       const event = createAuditEvent(type, at.toISOString(), {
@@ -792,10 +825,16 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       values,
       sources: { ...loaded.sources },
       warnings: [...loaded.warnings],
+      fields: CONFIG_FIELDS.map((field) => ({ path: field.path, type: field.type, description: field.description })),
     }
   }
 
-  async function setConfigValue(input: { scope: "global" | "project"; key: string; value: unknown }): Promise<ConfigView> {
+  async function setConfigValue(input: {
+    scope: "global" | "project"
+    key: string
+    value: unknown
+    sessionID?: string | undefined
+  }): Promise<ConfigView> {
     if (input.scope !== "global" && input.scope !== "project") {
       throw new MemoryError("invalid_config", `config scope must be "global" or "project"`, { scope: input.scope })
     }
@@ -805,7 +844,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     const problem = validateFieldValue(input.key, input.value)
     if (problem !== null) throw new MemoryError("invalid_config", problem, { key: input.key, value: input.value })
 
-    const workspace = await resolveWorkspace(undefined)
+    const workspace = await resolveWorkspace(input.sessionID)
     const files = filesFor(workspace)
     const file = input.scope === "global" ? files.globalConfig : files.projectConfig
     const text = readText(file)
@@ -824,16 +863,19 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     }
     setRawField(raw, input.key, input.value)
     atomicWrite(file, `${JSON.stringify(raw, null, 2)}\n`)
-    epoch++
-    emit("changed", { scope: "config", projectRoot: workspace.projectRoot })
+    commit({ projectRoot: workspace.projectRoot, projectDir: workspace.projectDir }, "config")
     return configView(load(workspace))
   }
 
-  async function setGuardrailMode(input: { id: string; mode: string }): Promise<{ id: string; mode: string; state: string }> {
+  async function setGuardrailMode(input: {
+    id: string
+    mode: string
+    sessionID?: string | undefined
+  }): Promise<{ id: string; mode: string; state: string }> {
     if (input.mode !== "inherit" && input.mode !== "warn" && input.mode !== "block") {
       throw new MemoryError("invalid_config", `guardrail mode must be inherit | warn | block`, { mode: input.mode })
     }
-    const workspace = await resolveWorkspace(undefined)
+    const workspace = await resolveWorkspace(input.sessionID)
     const loaded = load(workspace)
     const result = setGuardrailModeCore(loaded.guardrails, input.id, input.mode as GuardrailModeSetting)
     const capped = capGuardrails(result.records, loaded.config.capture.maxRecords)
@@ -1160,8 +1202,10 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       if (ACTIVE_ISSUE_STATUSES.includes(issue.status)) threadCounts.active.push(issue.id)
     }
     const guardrailCounts: Record<string, number> = { open: 0, resolved: 0, dismissed: 0 }
+    let reoccurring = 0
     for (const guardrail of loaded.guardrails) {
       guardrailCounts[guardrail.state] = (guardrailCounts[guardrail.state] ?? 0) + 1
+      if (guardrail.state === "open" && guardrail.count > 1) reoccurring++
     }
     const projectTerms = projectTermsFor(loaded.projectRoot)
     const lint: string[] = []
@@ -1184,6 +1228,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
         lessons: loaded.lessons.length,
         threads: threadCounts,
         guardrails: guardrailCounts,
+        reoccurring,
       },
       audit: {
         injections: stats.injections,
@@ -1194,6 +1239,21 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       },
       lint: lint.slice(0, 12),
     }
+  }
+
+  function guardrailList(loaded: LoadedWorkspace): GuardrailDTO[] {
+    return loaded.guardrails.map((record) => ({
+      id: record.id,
+      fingerprint: record.fingerprint,
+      tool: record.tool,
+      state: record.state,
+      mode: record.mode,
+      count: record.count,
+      firstSeen: record.firstSeen,
+      lastSeen: record.lastSeen,
+      errorSample: record.errorSample,
+      ...(record.fix !== undefined ? { fix: { input: record.fix.input, at: record.fix.at } } : {}),
+    }))
   }
 
   return {
@@ -1224,6 +1284,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     auditStats,
     injectionLog,
     effectivenessData,
+    guardrailList,
     labelsFor,
     recommendations,
   }

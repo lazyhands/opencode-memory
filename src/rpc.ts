@@ -18,6 +18,16 @@ const emptyInput = {
   additionalProperties: false,
 } as const
 
+/** Instance-scoped calls may name the session so resolution never guesses. */
+const sessionInput = {
+  type: "object",
+  properties: {
+    sessionID: { type: "string", description: "Session whose workspace should be used" },
+  },
+  required: [],
+  additionalProperties: false,
+} as const
+
 /** Effective config view: flattened values, per-field source, loader warnings. */
 const configView = {
   type: "object",
@@ -25,8 +35,21 @@ const configView = {
     values: { type: "object", description: "Effective values keyed by dotted config path" },
     sources: { type: "object", description: "Source label per dotted config path" },
     warnings: { type: "array", items: { type: "string" } },
+    fields: {
+      type: "array",
+      description: "Field catalog so clients can build editors",
+      items: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          type: { type: "string" },
+          description: { type: "string" },
+        },
+        required: ["path", "type", "description"],
+      },
+    },
   },
-  required: ["values", "sources", "warnings"],
+  required: ["values", "sources", "warnings", "fields"],
 } as const
 
 const usageEntry = {
@@ -58,7 +81,7 @@ export const MemoryRpc = Rpc.define({
 
     /** Full health snapshot for the instance's workspace. */
     status: {
-      input: emptyInput,
+      input: sessionInput,
       output: {
         type: "object",
         properties: {
@@ -86,8 +109,9 @@ export const MemoryRpc = Rpc.define({
                 required: ["open", "fixed", "verifying", "regressed", "closed", "active"],
               },
               guardrails: { type: "object" },
+              reoccurring: { type: "integer" },
             },
-            required: ["personality", "project", "lessons", "threads", "guardrails"],
+            required: ["personality", "project", "lessons", "threads", "guardrails", "reoccurring"],
           },
           audit: {
             type: "object",
@@ -108,7 +132,7 @@ export const MemoryRpc = Rpc.define({
 
     /** Effective config (values + sources + warnings). */
     "config.get": {
-      input: emptyInput,
+      input: sessionInput,
       output: configView,
     },
 
@@ -120,6 +144,7 @@ export const MemoryRpc = Rpc.define({
           scope: { type: "string", enum: ["global", "project"] },
           key: { type: "string", description: "Dotted config path, e.g. guardrails.mode" },
           value: { description: "New value (validated server-side against the field)" },
+          sessionID: { type: "string", description: "Session whose workspace should be used" },
         },
         required: ["scope", "key", "value"],
         additionalProperties: false,
@@ -141,6 +166,7 @@ export const MemoryRpc = Rpc.define({
         properties: {
           id: { type: "string", description: "Guardrail id like g3 or #g3" },
           mode: { type: "string", enum: ["inherit", "warn", "block"] },
+          sessionID: { type: "string", description: "Session whose workspace should be used" },
         },
         required: ["id", "mode"],
         additionalProperties: false,
@@ -170,12 +196,14 @@ export const MemoryRpc = Rpc.define({
     },
 
     /** Keyword recall across the stores (same engine as the memory_search tool). */
-    search: {      input: {
+    search: {
+      input: {
         type: "object",
         properties: {
           query: { type: "string" },
           target: { type: "string", enum: ["project", "personality", "all"] },
           limit: { type: "integer" },
+          sessionID: { type: "string", description: "Session whose workspace should be used" },
         },
         required: ["query"],
         additionalProperties: false,
@@ -199,6 +227,43 @@ export const MemoryRpc = Rpc.define({
           },
         },
         required: ["hits"],
+      },
+    },
+
+    /** All guardrail records (dashboard actions: toggle mode, inspect fixes). */
+    guardrails: {
+      input: sessionInput,
+      output: {
+        type: "object",
+        properties: {
+          records: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                id: { type: "string" },
+                fingerprint: { type: "string" },
+                tool: { type: "string" },
+                state: { type: "string" },
+                mode: { type: "string" },
+                count: { type: "integer" },
+                firstSeen: { type: "string" },
+                lastSeen: { type: "string" },
+                errorSample: { type: "string" },
+                fix: {
+                  type: "object",
+                  properties: {
+                    input: { type: "string" },
+                    at: { type: "string" },
+                  },
+                  required: ["input", "at"],
+                },
+              },
+              required: ["id", "fingerprint", "tool", "state", "mode", "count", "firstSeen", "lastSeen", "errorSample"],
+            },
+          },
+        },
+        required: ["records"],
       },
     },
 
@@ -257,6 +322,7 @@ export const MemoryRpc = Rpc.define({
         type: "object",
         properties: {
           scope: { type: "string", enum: ["all", "project", "personality"] },
+          sessionID: { type: "string", description: "Session whose workspace should be used" },
         },
         required: [],
         additionalProperties: false,

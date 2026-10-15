@@ -354,3 +354,60 @@ test("runtime is constructible without options", async () => {
   assert.ok(workspace.projectRoot.length > 0)
   assert.ok(workspace.projectDir.endsWith(join(".opencode", "memory")))
 })
+
+// ---------------------------------------------------------------------------
+// TUI-facing DTOs (Phase 5)
+// ---------------------------------------------------------------------------
+
+test("guardrailList and status expose reoccurring guardrails; configView carries the catalog", async () => {
+  const fx = makeServerFixture()
+  writeFileSync(
+    join(fx.projectDir, "guardrails.jsonl"),
+    serializeGuardrails([
+      guardrail({
+        id: "g1",
+        sig: "shell::npm test::x",
+        tool: "shell",
+        fingerprint: "npm test",
+        count: 2,
+        state: "open",
+      }),
+      guardrail({
+        id: "g2",
+        sig: "shell::yarn test::x",
+        tool: "shell",
+        fingerprint: "yarn test",
+        count: 1,
+        state: "resolved",
+        fix: { input: "bun test", at: "2026-10-05T00:00:00.000Z" },
+      }),
+    ]),
+  )
+  const loaded = fx.runtime.load(await fx.runtime.resolveWorkspace("ses_g"))
+
+  const records = fx.runtime.guardrailList(loaded)
+  assert.deepEqual(
+    records.map((record) => record.id),
+    ["g1", "g2"],
+  )
+  assert.equal(records[0]?.count, 2)
+  assert.equal(records[1]?.fix?.input, "bun test")
+
+  assert.equal(fx.runtime.statusData(loaded).usage.reoccurring, 1)
+  const view = fx.runtime.configView(loaded)
+  assert.equal(view.fields.length, 15)
+  assert.ok(view.fields.some((field) => field.path === "guardrails.mode" && field.type === "string"))
+})
+
+test("memory writes seed a .gitignore that only hides the audit log, without clobbering", async () => {
+  const fx = makeServerFixture()
+  await fx.runtime.setConfigValue({ scope: "project", key: "jit", value: true })
+
+  const ignore = join(fx.projectDir, ".gitignore")
+  assert.equal(readFileSync(ignore, "utf8"), "audit.jsonl\n")
+
+  // A user-authored .gitignore must never be overwritten.
+  writeFileSync(ignore, "audit.jsonl\nentries.json\n")
+  await fx.runtime.setConfigValue({ scope: "project", key: "jit", value: false })
+  assert.equal(readFileSync(ignore, "utf8"), "audit.jsonl\nentries.json\n")
+})

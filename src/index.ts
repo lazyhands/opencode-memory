@@ -36,6 +36,11 @@ function asObject(input: unknown): Record<string, unknown> {
   return input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
 }
 
+function sessionIDOf(data: Record<string, unknown>): string | undefined {
+  const value = data["sessionID"]
+  return typeof value === "string" && value !== "" ? value : undefined
+}
+
 export default Plugin.define({
   id: "memory",
   async setup(ctx) {
@@ -88,9 +93,15 @@ export default Plugin.define({
         directory: location?.directory ?? "",
       }),
 
-      status: async () => runtime.statusData(runtime.load(await runtime.resolveWorkspace())),
+      status: async (input) => {
+        const sessionID = sessionIDOf(asObject(input))
+        return runtime.statusData(runtime.load(await runtime.resolveWorkspace(sessionID)))
+      },
 
-      "config.get": async () => runtime.configView(runtime.load(await runtime.resolveWorkspace())),
+      "config.get": async (input) => {
+        const sessionID = sessionIDOf(asObject(input))
+        return runtime.configView(runtime.load(await runtime.resolveWorkspace(sessionID)))
+      },
 
       "config.set": async (input, context) => {
         try {
@@ -99,6 +110,7 @@ export default Plugin.define({
             scope: data["scope"] === "global" ? "global" : "project",
             key: typeof data["key"] === "string" ? data["key"] : String(data["key"] ?? ""),
             value: data["value"],
+            sessionID: sessionIDOf(data),
           })
         } catch (error) {
           if (isMemoryError(error) && error.code === "invalid_config") {
@@ -114,6 +126,7 @@ export default Plugin.define({
           return await runtime.setGuardrailMode({
             id: typeof data["id"] === "string" ? data["id"] : String(data["id"] ?? ""),
             mode: typeof data["mode"] === "string" ? data["mode"] : String(data["mode"] ?? ""),
+            sessionID: sessionIDOf(data),
           })
         } catch (error) {
           if (isMemoryError(error)) {
@@ -133,25 +146,29 @@ export default Plugin.define({
         const target = rawTarget === "personality" || rawTarget === "all" ? rawTarget : "project"
         const rawLimit = data["limit"]
         const limit = typeof rawLimit === "number" && Number.isFinite(rawLimit) ? rawLimit : 5
-        const loaded = runtime.load(await runtime.resolveWorkspace())
+        const loaded = runtime.load(await runtime.resolveWorkspace(sessionIDOf(data)))
         return { hits: runtime.searchMemory(loaded, query, target, limit) }
       },
 
       injections: async (input) => {
         const data = asObject(input)
-        const sessionID =
-          typeof data["sessionID"] === "string" && data["sessionID"] !== "" ? data["sessionID"] : undefined
+        const sessionID = sessionIDOf(data)
         const rawLimit = data["limit"]
         const limit = typeof rawLimit === "number" && Number.isFinite(rawLimit) ? rawLimit : 50
         const loaded = runtime.load(await runtime.resolveWorkspace(sessionID))
         return { events: runtime.injectionLog(loaded, { sessionID, limit }) }
       },
 
+      guardrails: async (input) => {
+        const loaded = runtime.load(await runtime.resolveWorkspace(sessionIDOf(asObject(input))))
+        return { records: runtime.guardrailList(loaded) }
+      },
+
       effectiveness: async (input) => {
         const data = asObject(input)
         const rawScope = data["scope"]
         const scope = rawScope === "project" || rawScope === "personality" ? rawScope : "all"
-        const loaded = runtime.load(await runtime.resolveWorkspace())
+        const loaded = runtime.load(await runtime.resolveWorkspace(sessionIDOf(data)))
         return runtime.effectivenessData(loaded, scope)
       },
     })
