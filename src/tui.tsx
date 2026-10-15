@@ -5,21 +5,18 @@ import { MemoryRpc } from "./rpc.ts"
 /**
  * Memory TUI plugin.
  *
- * Phase 0: a sidebar marker and a `/memory` command that round-trips the RPC
- * contract, proving server↔TUI communication. The audit dashboard and config
- * editor land in Phase 5.
+ * Currently a provisional sidebar label plus a `/memory` command that
+ * round-trips the RPC contract. The real sidebar counters and audit dashboard
+ * land in Phase 5.
  */
 export default Plugin.define({
   id: "memory.tui",
   setup(context) {
-    // Temporary Phase 0 diagnostic: proves the TUI part loaded (remove in Phase 5).
-    context.ui.toast.show({ message: "memory TUI loaded", variant: "success" })
-
     context.ui.slot({
       append: "sidebar.content",
       render: () => (
         <box flexDirection="column">
-          <text>memory: phase 0</text>
+          <text>memory</text>
         </box>
       ),
     })
