@@ -136,6 +136,24 @@ export default Plugin.define({
         const loaded = runtime.load(await runtime.resolveWorkspace())
         return { hits: runtime.searchMemory(loaded, query, target, limit) }
       },
+
+      injections: async (input) => {
+        const data = asObject(input)
+        const sessionID =
+          typeof data["sessionID"] === "string" && data["sessionID"] !== "" ? data["sessionID"] : undefined
+        const rawLimit = data["limit"]
+        const limit = typeof rawLimit === "number" && Number.isFinite(rawLimit) ? rawLimit : 50
+        const loaded = runtime.load(await runtime.resolveWorkspace(sessionID))
+        return { events: runtime.injectionLog(loaded, { sessionID, limit }) }
+      },
+
+      effectiveness: async (input) => {
+        const data = asObject(input)
+        const rawScope = data["scope"]
+        const scope = rawScope === "project" || rawScope === "personality" ? rawScope : "all"
+        const loaded = runtime.load(await runtime.resolveWorkspace())
+        return runtime.effectivenessData(loaded, scope)
+      },
     })
 
     emitRpc = (name, data) => {

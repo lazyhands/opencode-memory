@@ -273,6 +273,81 @@ test("projectTermsFor returns directory name and root", () => {
   assert.deepEqual(terms, ["project-root", "/tmp/some/project-root"])
 })
 
+// ---------------------------------------------------------------------------
+// Audit retention + TUI data providers
+// ---------------------------------------------------------------------------
+
+test("writeAudit prunes events outside the retention window", async () => {
+  const fx = makeServerFixture({ audit: { retentionDays: 1 } })
+  const file = join(fx.projectDir, "audit.jsonl")
+  writeFileSync(
+    file,
+    `${JSON.stringify({ v: 1, ts: "2020-01-01T00:00:00.000Z", type: "inject", hash: "s:old", chars: 1 })}\n`,
+  )
+  const loaded = fx.runtime.load(await fx.runtime.resolveWorkspace("ses_prune"))
+  fx.runtime.writeAudit(loaded, "search", { query: "x", hits: 0 })
+  const events = parseEvents(readFileSync(file, "utf8"))
+  assert.equal(events.length, 1)
+  assert.equal(events[0]?.type, "search")
+})
+
+test("injectionLog returns newest-first entries with sections and refs, filterable by session", async () => {
+  const fx = makeServerFixture()
+  seedStores(fx)
+  await fx.runtime.inject({
+    sessionID: "ses_log",
+    messages: [{ role: "user", id: "m1", content: [{ type: "text", text: "how does auth refresh work?" }] }],
+  })
+  await fx.runtime.inject({
+    sessionID: "ses_other",
+    messages: [{ role: "user", id: "m2", content: [{ type: "text", text: "hello" }] }],
+  })
+  const loaded = fx.runtime.load(await fx.runtime.resolveWorkspace("ses_log"))
+
+  const all = fx.runtime.injectionLog(loaded, { limit: 10 })
+  assert.equal(all.length, 2)
+  assert.ok(all[0]!.ts >= all[1]!.ts, "newest first")
+  assert.ok(all[0]!.sections.some((section) => section.name === "MEMORY PROTOCOL"))
+
+  const only = fx.runtime.injectionLog(loaded, { sessionID: "ses_log", limit: 10 })
+  assert.equal(only.length, 1)
+  assert.equal(only[0]?.sessionID, "ses_log")
+  assert.ok((only[0]?.refs ?? []).length > 0, "entry refs captured for the effectiveness join")
+
+  // When JIT fires, the reason map explains why the section was injected.
+  const jitEntry = fx.runtime.injectionLog(loaded, { sessionID: "ses_log", limit: 10 })[0]
+  const relevant = jitEntry?.sections.find((section) => section.name === "RELEVANT THIS TURN")
+  assert.ok(relevant !== undefined)
+  const reasons = Object.values(relevant.why ?? {})
+  assert.ok(reasons.some((reason) => reason.startsWith("jit:")), `jit reasons in ${JSON.stringify(relevant.why)}`)
+})
+
+test("effectivenessData filters by scope, labels entries and carries totals", async () => {
+  const fx = makeServerFixture()
+  seedStores(fx)
+  await fx.runtime.inject({
+    sessionID: "ses_eff",
+    messages: [{ role: "user", id: "m1", content: [{ type: "text", text: "how does auth refresh work?" }] }],
+  })
+  const loaded = fx.runtime.load(await fx.runtime.resolveWorkspace("ses_eff"))
+
+  const all = fx.runtime.effectivenessData(loaded, "all")
+  assert.equal(all.totals.injections, 1)
+  assert.ok(all.entries.length > 0)
+  assert.ok(all.entries.every((entry) => entry.injected >= 1 && entry.reoccurred === 0))
+  assert.ok(all.entries.some((entry) => entry.ref.startsWith("p:")))
+  assert.ok(all.entries.some((entry) => entry.ref.startsWith("j:")))
+  assert.ok(all.entries.some((entry) => entry.label !== undefined))
+
+  const personality = fx.runtime.effectivenessData(loaded, "personality")
+  assert.ok(personality.entries.length > 0)
+  assert.ok(personality.entries.every((entry) => entry.ref.startsWith("p:")))
+
+  const project = fx.runtime.effectivenessData(loaded, "project")
+  assert.ok(project.entries.every((entry) => !entry.ref.startsWith("p:")))
+  assert.ok(project.entries.some((entry) => entry.ref.startsWith("j:")))
+})
+
 test("runtime is constructible without options", async () => {
   const runtime = createRuntime({ resolveDirectory: async () => process.cwd() })
   const workspace = await runtime.resolveWorkspace()

@@ -574,7 +574,7 @@ export function memoryTools(runtime: MemoryRuntime): MemoryToolDefinition[] {
           runtime.writeAudit(loaded, "review", { events: events.length })
           const lines: string[] = []
           lines.push(
-            `memory audit — ${stats.sessions} session(s) · ${stats.injections} injection(s) · ${stats.failures} failure(s) · ${stats.resolves} resolve(s) · ${stats.searches} search(es)`,
+            `memory audit — ${stats.sessions} session(s) · ${stats.injections} injection(s) · ${stats.failures} failure(s) · ${stats.resolves} resolve(s) · ${stats.preflights} preflight(s) (${stats.blocked} blocked) · ${stats.searches} search(es)`,
           )
           if (!loaded.config.audit.enabled) lines.push("(audit.enabled is false — new events are not being recorded)")
 

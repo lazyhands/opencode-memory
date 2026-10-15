@@ -10,7 +10,7 @@
  * Deliberately free of runtime imports from `@opencode/*` so `node --test` can
  * exercise it directly with fake deps.
  */
-import { appendEventText, buildRecommendations, computeStats, contentId, createAuditEvent, entryRef, parseEvents } from "./core/audit.ts"
+import { appendEventText, buildRecommendations, computeStats, contentId, createAuditEvent, entryRef, parseEvents, pruneEvents, serializeEvents } from "./core/audit.ts"
 import type { AuditEvent, AuditEventType, AuditStats } from "./core/audit.ts"
 import {
   CONFIG_FIELD_PATHS,
@@ -312,6 +312,40 @@ export interface SearchHitDTO {
   ref: string
 }
 
+/** One logged injection (for the TUI injections timeline). */
+export interface InjectionLogEntry {
+  ts: string
+  sessionID?: string | undefined
+  turnKey?: string | undefined
+  hash: string
+  chars: number
+  refs: string[]
+  sections: { name: string; chars: number; reason: string; refs: string[]; why?: Record<string, string> }[]
+  truncations?: string[] | undefined
+}
+
+/** Effectiveness table + totals (for the TUI effectiveness tab). */
+export interface EffectivenessData {
+  totals: {
+    sessions: number
+    injections: number
+    failures: number
+    resolves: number
+    preflights: number
+    blocked: number
+    searches: number
+  }
+  entries: {
+    ref: string
+    injected: number
+    reoccurred: number
+    firstInjectedAt?: string | undefined
+    lastInjectedAt?: string | undefined
+    label?: string | undefined
+  }[]
+  recommendations: string[]
+}
+
 export type SearchTarget = "project" | "personality" | "all"
 
 export interface ConfigView {
@@ -359,6 +393,10 @@ export interface MemoryRuntime {
   searchMemory(loaded: LoadedWorkspace, query: string, target?: SearchTarget, limit?: number): SearchHitDTO[]
   auditEvents(loaded: LoadedWorkspace): AuditEvent[]
   auditStats(loaded: LoadedWorkspace): AuditStats
+  /** Recent injection log entries, newest first (TUI timeline). */
+  injectionLog(loaded: LoadedWorkspace, options?: { sessionID?: string | undefined; limit?: number | undefined }): InjectionLogEntry[]
+  /** Effectiveness table + recommendations, filtered by scope (TUI tab). */
+  effectivenessData(loaded: LoadedWorkspace, scope?: "all" | "project" | "personality"): EffectivenessData
   labelsFor(loaded: LoadedWorkspace): Map<string, string>
   recommendations(loaded: LoadedWorkspace, stats: AuditStats): string[]
 }
@@ -543,11 +581,19 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
   function writeAudit(loaded: LoadedWorkspace, type: AuditEventType, fields: Record<string, unknown>): void {
     if (!loaded.config.audit.enabled) return
     try {
-      const event = createAuditEvent(type, now().toISOString(), {
+      const at = now()
+      const text = readText(loaded.files.audit)
+      const event = createAuditEvent(type, at.toISOString(), {
         ...(loaded.sessionID ? { sessionID: loaded.sessionID } : {}),
         ...fields,
       })
-      atomicWrite(loaded.files.audit, appendEventText(readText(loaded.files.audit), event))
+      // Append then prune: the log stays inside `audit.retentionDays`, so
+      // parse cost and file size stay bounded for the life of a project.
+      const events = pruneEvents(parseEvents(appendEventText(text, event)), {
+        retentionDays: loaded.config.audit.retentionDays,
+        now: at,
+      })
+      atomicWrite(loaded.files.audit, serializeEvents(events))
     } catch (error) {
       // Audit must never break a session or a tool call.
       deps.debug?.(`audit write failed: ${String(error)}`)
@@ -1015,6 +1061,77 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     return computeStats(auditEvents(loaded))
   }
 
+  function injectionLog(
+    loaded: LoadedWorkspace,
+    options: { sessionID?: string | undefined; limit?: number | undefined } = {},
+  ): InjectionLogEntry[] {
+    const limit = Math.min(Math.max(options.limit ?? 50, 1), 200)
+    const entries: InjectionLogEntry[] = []
+    for (const event of auditEvents(loaded)) {
+      if (event.type !== "inject") continue
+      const session = event["sessionID"]
+      if (options.sessionID !== undefined && session !== options.sessionID) continue
+      const hash = event["hash"]
+      const chars = event["chars"]
+      const sections = Array.isArray(event["sections"]) ? (event["sections"] as InjectionLogEntry["sections"]) : []
+      const refs = Array.isArray(event["refs"]) ? event["refs"].filter((ref): ref is string => typeof ref === "string") : []
+      const truncations = Array.isArray(event["truncations"])
+        ? event["truncations"].filter((item): item is string => typeof item === "string")
+        : undefined
+      entries.push({
+        ts: event.ts,
+        ...(typeof session === "string" ? { sessionID: session } : {}),
+        ...(typeof event["turnKey"] === "string" ? { turnKey: event["turnKey"] } : {}),
+        hash: typeof hash === "string" ? hash : "?",
+        chars: typeof chars === "number" ? chars : 0,
+        refs,
+        sections,
+        ...(truncations !== undefined && truncations.length > 0 ? { truncations } : {}),
+      })
+    }
+    return entries.slice(-limit).reverse()
+  }
+
+  function effectivenessData(
+    loaded: LoadedWorkspace,
+    scope: "all" | "project" | "personality" = "all",
+  ): EffectivenessData {
+    const stats = auditStats(loaded)
+    const labels = labelsFor(loaded)
+    const inScope = (ref: string): boolean => {
+      if (scope === "all") return true
+      if (scope === "personality") return ref.startsWith("p:")
+      return !ref.startsWith("p:")
+    }
+    const entries = stats.entries
+      .filter((entry) => inScope(entry.ref))
+      .sort((a, b) => b.reoccurred - a.reoccurred || b.injected - a.injected || a.ref.localeCompare(b.ref))
+      .map((entry) => {
+        const label = labels.get(entry.ref)
+        return {
+          ref: entry.ref,
+          injected: entry.injected,
+          reoccurred: entry.reoccurred,
+          ...(entry.firstInjectedAt !== undefined ? { firstInjectedAt: entry.firstInjectedAt } : {}),
+          ...(entry.lastInjectedAt !== undefined ? { lastInjectedAt: entry.lastInjectedAt } : {}),
+          ...(label !== undefined ? { label } : {}),
+        }
+      })
+    return {
+      totals: {
+        sessions: stats.sessions,
+        injections: stats.injections,
+        failures: stats.failures,
+        resolves: stats.resolves,
+        preflights: stats.preflights,
+        blocked: stats.blocked,
+        searches: stats.searches,
+      },
+      entries,
+      recommendations: recommendations(loaded, stats),
+    }
+  }
+
   function labelsFor(loaded: LoadedWorkspace): Map<string, string> {
     const labels = new Map<string, string>()
     for (const entry of loaded.personality) labels.set(entryRef("p", displayEntry(entry)), displayEntry(entry))
@@ -1105,6 +1222,8 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     searchMemory,
     auditEvents,
     auditStats,
+    injectionLog,
+    effectivenessData,
     labelsFor,
     recommendations,
   }

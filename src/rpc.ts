@@ -170,8 +170,7 @@ export const MemoryRpc = Rpc.define({
     },
 
     /** Keyword recall across the stores (same engine as the memory_search tool). */
-    search: {
-      input: {
+    search: {      input: {
         type: "object",
         properties: {
           query: { type: "string" },
@@ -200,6 +199,102 @@ export const MemoryRpc = Rpc.define({
           },
         },
         required: ["hits"],
+      },
+    },
+
+    /** Injection timeline (newest first) for the TUI dashboard. */
+    injections: {
+      input: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          limit: { type: "integer" },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          events: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                ts: { type: "string" },
+                sessionID: { type: "string" },
+                turnKey: { type: "string" },
+                hash: { type: "string" },
+                chars: { type: "integer" },
+                refs: { type: "array", items: { type: "string" } },
+                sections: {
+                  type: "array",
+                  items: {
+                    type: "object",
+                    properties: {
+                      name: { type: "string" },
+                      chars: { type: "integer" },
+                      reason: { type: "string" },
+                      refs: { type: "array", items: { type: "string" } },
+                      why: { type: "object" },
+                    },
+                    required: ["name", "chars", "reason", "refs"],
+                  },
+                },
+                truncations: { type: "array", items: { type: "string" } },
+              },
+              required: ["ts", "hash", "chars", "refs", "sections"],
+            },
+          },
+        },
+        required: ["events"],
+      },
+    },
+
+    /** Per-entry effectiveness + recommendations for the TUI dashboard. */
+    effectiveness: {
+      input: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["all", "project", "personality"] },
+        },
+        required: [],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          totals: {
+            type: "object",
+            properties: {
+              sessions: { type: "integer" },
+              injections: { type: "integer" },
+              failures: { type: "integer" },
+              resolves: { type: "integer" },
+              preflights: { type: "integer" },
+              blocked: { type: "integer" },
+              searches: { type: "integer" },
+            },
+            required: ["sessions", "injections", "failures", "resolves", "preflights", "blocked", "searches"],
+          },
+          entries: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                ref: { type: "string" },
+                injected: { type: "integer" },
+                reoccurred: { type: "integer" },
+                firstInjectedAt: { type: "string" },
+                lastInjectedAt: { type: "string" },
+                label: { type: "string" },
+              },
+              required: ["ref", "injected", "reoccurred"],
+            },
+          },
+          recommendations: { type: "array", items: { type: "string" } },
+        },
+        required: ["totals", "entries", "recommendations"],
       },
     },
   },
