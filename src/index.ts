@@ -202,6 +202,40 @@ export default Plugin.define({
     })
 
     // -----------------------------------------------------------------------
+    // Guardrail dynamics (enforcement ladder #3–5)
+    // -----------------------------------------------------------------------
+
+    // Pre-flight: match planned calls against recorded failure guardrails.
+    // warn (default) pins the fix into the next model call without touching
+    // this one; block (opt-in) aborts the call with the recorded fix —
+    // verified in Phase 0: rejecting `execute.before` fails that call alone.
+    await ctx.tool.hook("execute.before", async (event) => {
+      let result: Awaited<ReturnType<typeof runtime.preflight>>
+      try {
+        result = await runtime.preflight({ sessionID: event.sessionID, tool: event.tool, input: event.input })
+      } catch (error) {
+        debugLog(`preflight failed: ${String(error)}`)
+        return
+      }
+      if (result.blocked && result.message) throw new Error(result.message)
+    })
+
+    // After every call: capture failures (+ coaching) or auto-resolve fixes.
+    // Nonzero exits arrive as *completed* results with exit metadata — the
+    // runtime routes both shapes through `toolOutcome`.
+    await ctx.tool.hook("execute.after", async (event) => {
+      try {
+        await runtime.toolOutcome(
+          event.status === "error"
+            ? { sessionID: event.sessionID, tool: event.tool, input: event.input, status: "error", error: event.error }
+            : { sessionID: event.sessionID, tool: event.tool, input: event.input, status: "completed", result: event.result },
+        )
+      } catch (error) {
+        debugLog(`execute.after failed: ${String(error)}`)
+      }
+    })
+
+    // -----------------------------------------------------------------------
     // Diagnostics (removed in Phase 6)
     // -----------------------------------------------------------------------
     if (ctx.options["spike"] === true) {

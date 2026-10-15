@@ -32,8 +32,10 @@ import {
   readGuardrails,
   readIssues,
   readLearnings,
+  resolveGuardrail,
   serializeGuardrails,
   setGuardrailMode as setGuardrailModeCore,
+  upsertGuardrail,
 } from "./core/learnings.ts"
 import type { Guardrail, GuardrailModeSetting, Issue, Learning } from "./core/learnings.ts"
 import {
@@ -54,9 +56,18 @@ import {
 } from "./core/paths.ts"
 import { searchDocs } from "./core/search.ts"
 import type { SearchDoc } from "./core/search.ts"
-import { buildSnapshot, SECTION_RENDER_ORDER } from "./core/snapshot.ts"
+import { buildSnapshot, guardrailLine, SECTION_RENDER_ORDER } from "./core/snapshot.ts"
 import type { SectionName, SnapshotPin, SnapshotSectionInfo } from "./core/snapshot.ts"
-import { stableStringify } from "./core/signature.ts"
+import {
+  canResolveWith,
+  jaccard,
+  matchGuardrail,
+  normalizeCall,
+  signatureFor,
+  stableStringify,
+  tokenSet,
+} from "./core/signature.ts"
+import type { CallLike } from "./core/signature.ts"
 import { charCount, displayEntry, readEntries, routingLint } from "./core/store.ts"
 import type { Entry } from "./core/store.ts"
 import { basename } from "node:path"
@@ -158,6 +169,9 @@ export function deriveTurnKey(messages: readonly unknown[]): string {
 
 export const TURN_TOOL_CALL_LIMIT = 24
 
+/** Cap on guardrail ids remembered as surfaced per session. */
+export const SURFACED_LIMIT = 32
+
 /** Current turn's user text + file paths/commands from its tool calls. */
 export function turnContextFromMessages(messages: readonly unknown[]): TurnContext {
   let lastUser = -1
@@ -204,6 +218,46 @@ export interface InjectionResult {
   chars?: number | undefined
 }
 
+/** Result of capturing a tool failure (`execute.after` → status error). */
+export interface CaptureResult {
+  /** Guardrail id that records the failure (undefined when capture is off). */
+  guardrail?: string | undefined
+  /** True when a previously resolved guardrail matched and its fix was pinned. */
+  coached: boolean
+}
+
+/** Result of matching a planned call against guardrails (`execute.before`). */
+export interface PreflightResult {
+  blocked: boolean
+  guardrail?: string | undefined
+  /** Message for the aborted call (block mode only). */
+  message?: string | undefined
+}
+
+/** Result of auto-resolving guardrails after a successful call. */
+export interface AutoResolveResult {
+  resolved: string[]
+}
+
+/** One tool outcome from `execute.after` (error or completed). */
+export interface ToolOutcomeInput {
+  sessionID: string
+  tool: string
+  input: unknown
+  status: "completed" | "error"
+  /** Present when the tool threw (`status: "error"`). */
+  error?: unknown
+  /** Present when the tool returned (`status: "completed"`). */
+  result?: unknown
+}
+
+/** What `toolOutcome` did with one call. */
+export interface ToolOutcomeResult {
+  captured: boolean
+  coached: boolean
+  resolved: string[]
+}
+
 interface SessionState {
   turnKey?: string | undefined
   block?: string | undefined
@@ -217,6 +271,8 @@ interface SessionState {
   pins: SnapshotPin[]
   pinsVersion: number
   blockPinsVersion: number
+  /** Guardrail ids surfaced to the model this session (id → last surfaced at). */
+  surfaced: Map<string, string>
   inFlight?: Promise<InjectionResult> | undefined
 }
 
@@ -288,6 +344,14 @@ export interface MemoryRuntime {
   clearPins(sessionID: string): void
   /** Invalidate the cached block for a session (compaction). */
   invalidateBlock(sessionID: string): void
+  /** Failure capture + coaching (`execute.after` → status error). */
+  captureFailure(input: { sessionID: string; tool: string; input: unknown; error: unknown }): Promise<CaptureResult>
+  /** Pre-flight match (`execute.before`): warn pin or block message. */
+  preflight(input: { sessionID: string; tool: string; input: unknown }): Promise<PreflightResult>
+  /** Auto-resolve surfaced guardrails fixed by a successful call. */
+  autoResolve(input: { sessionID: string; tool: string; input: unknown }): Promise<AutoResolveResult>
+  /** Route one `execute.after` outcome (throw or completed call). */
+  toolOutcome(input: ToolOutcomeInput): Promise<ToolOutcomeResult>
   statusData(loaded: LoadedWorkspace): StatusData
   configView(loaded: LoadedWorkspace): ConfigView
   setConfigValue(input: { scope: "global" | "project"; key: string; value: unknown }): Promise<ConfigView>
@@ -310,6 +374,73 @@ export function projectTermsFor(projectRoot: string): string[] {
   return [basename(projectRoot), projectRoot]
 }
 
+/**
+ * Is this successful call a plausible fix for the guardrail? Core's
+ * `canResolveWith` says "same tool, different input"; we add one precision
+ * floor on top: the inputs must share a token, so an unrelated `ls` never
+ * auto-resolves a recorded `npm test` failure.
+ */
+function fixCandidate(record: Guardrail, call: CallLike): boolean {
+  if (!canResolveWith(record, call)) return false
+  const callTokens = tokenSet(normalizeCall(call.tool, call.input).fingerprint)
+  const recordTokens = tokenSet(record.fingerprint)
+  if (callTokens.size === 0 || recordTokens.size === 0) return true
+  return jaccard(callTokens, recordTokens) >= 0.2
+}
+
+/** Tools never captured as guardrails: our own surface and the code-mode wrapper. */
+function isGuardrailTool(tool: string, ignoreTools: readonly string[]): boolean {
+  if (tool === "" || tool === "execute") return false
+  if (tool.startsWith("memory_")) return false
+  return !ignoreTools.includes(tool)
+}
+
+function exitCodeOf(value: unknown): number | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined
+  const exit = (value as Record<string, unknown>)["exit"]
+  return typeof exit === "number" && Number.isFinite(exit) ? exit : undefined
+}
+
+/** Flattened text of a tool result's content parts (defensive about shapes). */
+function resultText(result: unknown): string {
+  if (!result || typeof result !== "object") return ""
+  const content = (result as { content?: unknown }).content
+  if (typeof content === "string") return content
+  if (!Array.isArray(content)) return ""
+  const parts: string[] = []
+  for (const part of content) {
+    const text = (part as { text?: unknown } | undefined)?.text
+    if (typeof text === "string") parts.push(text)
+  }
+  return parts.join("\n")
+}
+
+/**
+ * A *completed* tool call that actually failed. The shell tool reports a
+ * nonzero exit as a normal result (`output.exit` / `metadata.exit`) rather
+ * than an error — the dominant failure mode in practice. Returns the failure
+ * text to record, or undefined for genuine successes.
+ */
+export function failureTextFromResult(result: unknown): string | undefined {
+  if (!result || typeof result !== "object") return undefined
+  const record = result as { output?: unknown; metadata?: unknown }
+  const outputExit = exitCodeOf(record.output)
+  const metadataExit = exitCodeOf(record.metadata)
+  const outputStatus =
+    record.output && typeof record.output === "object" && !Array.isArray(record.output)
+      ? (record.output as Record<string, unknown>)["status"]
+      : undefined
+  const failed =
+    (outputExit !== undefined && outputExit !== 0) ||
+    (metadataExit !== undefined && metadataExit !== 0) ||
+    outputStatus === "error"
+  if (!failed) return undefined
+  const text = resultText(result).trim()
+  if (text !== "") return text
+  const exit = outputExit ?? metadataExit
+  return exit !== undefined ? `exit ${exit}` : "command failed"
+}
+
 export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
   let epoch = 0
   const sessions = new Map<string, SessionState>()
@@ -327,6 +458,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
         pins: [],
         pinsVersion: 0,
         blockPinsVersion: 0,
+        surfaced: new Map(),
       }
       sessions.set(sessionID, state)
     }
@@ -440,7 +572,10 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       return { ...(state.block ? { block: state.block } : {}), rebuilt: false, ...(state.blockHash ? { hash: state.blockHash } : {}), chars: state.block?.length }
     }
 
-    if (turnChanged) {
+    if (state.turnKey !== undefined && turnChanged) {
+      // A genuinely new user turn drops last turn's pins. The very first
+      // inject of a session keeps pins recorded before any block existed
+      // (pre-flight can fire before the first model call).
       state.pins = []
       state.pinsVersion++
     }
@@ -476,6 +611,14 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     state.blockConfigStamp = configStamp
     state.blockPinsVersion = state.pinsVersion
 
+    // Remember which guardrails the model has now seen; a later successful
+    // call on the same tool can auto-resolve them (enforcement ladder #5).
+    // Section refs cover always-injected records, JIT matches and pins alike.
+    markSurfaced(
+      state,
+      snapshot.sections.flatMap((section) => section.refs),
+    )
+
     if (snapshot.block !== "") {
       const why: Record<string, string> = {}
       for (const match of jit) why[match.type === "thread" ? `t:${match.id}` : match.id] = match.reason
@@ -501,6 +644,9 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
         turnKey,
         hash: snapshot.hash,
         chars: snapshot.chars,
+        // Flat refs list: the effectiveness stats ("injected N / reoccurred M")
+        // key on this, independent of section layout.
+        refs: [...new Set(sections.flatMap((section) => section.refs))],
         sections,
         ...(snapshot.truncations.length > 0 ? { truncations: snapshot.truncations } : {}),
       })
@@ -569,6 +715,23 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     state.pinsVersion++
   }
 
+  /** Remember guardrail refs shown to the model (bounded, insertion-ordered). */
+  function markSurfaced(state: SessionState, refs: readonly string[]): void {
+    let touched = false
+    const at = now().toISOString()
+    for (const ref of refs) {
+      if (!ref.startsWith("g:")) continue
+      state.surfaced.set(ref.slice(2), at)
+      touched = true
+    }
+    if (!touched) return
+    while (state.surfaced.size > SURFACED_LIMIT) {
+      const oldest = state.surfaced.keys().next().value
+      if (oldest === undefined) break
+      state.surfaced.delete(oldest)
+    }
+  }
+
   function invalidateBlock(sessionID: string): void {
     const state = sessionState(sessionID)
     state.block = undefined
@@ -631,6 +794,168 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     atomicWrite(loaded.files.guardrails, serializeGuardrails(capped))
     commit(loaded, "guardrails")
     return { id: result.record.id, mode: result.record.mode, state: result.record.state }
+  }
+
+  // -------------------------------------------------------------------------
+  // Guardrail dynamics (enforcement ladder #3–5)
+  // -------------------------------------------------------------------------
+
+  function blockMessage(record: Guardrail): string {
+    const fix = record.fix ? ` Fix: use \`${record.fix.input}\` instead.` : ""
+    const seen = record.count > 1 ? ` (failed ${record.count}×)` : ""
+    return `Blocked by memory guardrail #${record.id}${seen}: \`${record.fingerprint}\` — ${record.errorSample}.${fix} If this is wrong, dismiss the guardrail in the /memory panel or run memory_audit.`
+  }
+
+  async function captureFailure(input: {
+    sessionID: string
+    tool: string
+    input: unknown
+    error: unknown
+  }): Promise<CaptureResult> {
+    const state = sessionState(input.sessionID)
+    const loaded = load(await resolveWorkspace(input.sessionID))
+    if (!loaded.config.capture.toolErrors) return { coached: false }
+    if (!isGuardrailTool(input.tool, loaded.config.capture.ignoreTools)) return { coached: false }
+
+    // Coaching: does a *resolved* guardrail with a fix match this failing
+    // call? Checked before the upsert so the pre-failure state decides.
+    const call: CallLike = { tool: input.tool, input: input.input }
+    const coachedRecord = loaded.guardrails.find(
+      (record) => record.state === "resolved" && record.fix !== undefined && matchGuardrail(record, call).match,
+    )
+
+    const signature = signatureFor(input.tool, input.input, input.error)
+    const result = upsertGuardrail(loaded.guardrails, { ...signature, sessionID: input.sessionID }, now().toISOString())
+    atomicWrite(
+      loaded.files.guardrails,
+      serializeGuardrails(capGuardrails(result.records, loaded.config.capture.maxRecords)),
+    )
+    commit(loaded, "guardrails")
+
+    writeAudit(loaded, "fail", {
+      guardrail: result.record.id,
+      tool: input.tool,
+      fingerprint: signature.fingerprint,
+      isNew: result.isNew,
+      count: result.record.count,
+    })
+    // A repeat failure of a guardrail the model has already seen is the
+    // effectiveness signal the audit tracks ("reoccurred after injection").
+    const injectedBefore = auditStats(loaded).entries.some(
+      (entry) => entry.ref === `g:${result.record.id}` && entry.injected > 0,
+    )
+    if (!result.isNew && injectedBefore) {
+      writeAudit(loaded, "reoccur", { ref: `g:${result.record.id}`, tool: input.tool })
+    }
+
+    if (coachedRecord) {
+      pin(input.sessionID, {
+        ref: `g:${coachedRecord.id}`,
+        text: guardrailLine(coachedRecord),
+        reason: `coach:${coachedRecord.id}`,
+      })
+      markSurfaced(state, [`g:${coachedRecord.id}`])
+    }
+    return { guardrail: result.record.id, coached: coachedRecord !== undefined }
+  }
+
+  async function preflight(input: { sessionID: string; tool: string; input: unknown }): Promise<PreflightResult> {
+    const state = sessionState(input.sessionID)
+    const loaded = load(await resolveWorkspace(input.sessionID))
+    if (!isGuardrailTool(input.tool, loaded.config.capture.ignoreTools)) return { blocked: false }
+
+    const call: CallLike = { tool: input.tool, input: input.input }
+    const scored = loaded.guardrails
+      .filter((record) => record.state !== "dismissed")
+      .map((record) => ({ record, match: matchGuardrail(record, call) }))
+      .filter((item) => item.match.match)
+      .map((item) => ({
+        record: item.record,
+        rank:
+          (item.match.exact ? 4 : 0) +
+          (item.record.state === "resolved" && item.record.fix ? 2 : 0) +
+          (item.record.count > 1 ? 1 : 0),
+      }))
+    if (scored.length === 0) return { blocked: false }
+
+    // Strongest first: exact fingerprint, then resolved-with-fix, then frequent.
+    scored.sort(
+      (a, b) =>
+        b.rank - a.rank ||
+        b.record.lastSeen.localeCompare(a.record.lastSeen) ||
+        a.record.id.localeCompare(b.record.id),
+    )
+    const chosen = scored[0]?.record
+    if (!chosen) return { blocked: false }
+
+    const mode = chosen.mode !== "inherit" ? chosen.mode : loaded.config.guardrails.mode
+    markSurfaced(state, [`g:${chosen.id}`])
+    if (mode === "block") {
+      writeAudit(loaded, "preflight", { guardrail: chosen.id, tool: input.tool, mode, blocked: true })
+      return { blocked: true, guardrail: chosen.id, message: blockMessage(chosen) }
+    }
+    pin(input.sessionID, { ref: `g:${chosen.id}`, text: guardrailLine(chosen), reason: `preflight:${chosen.id}` })
+    writeAudit(loaded, "preflight", { guardrail: chosen.id, tool: input.tool, mode, blocked: false })
+    return { blocked: false, guardrail: chosen.id }
+  }
+
+  async function autoResolve(input: { sessionID: string; tool: string; input: unknown }): Promise<AutoResolveResult> {
+    const state = sessionState(input.sessionID)
+    if (state.surfaced.size === 0) return { resolved: [] }
+    const loaded = load(await resolveWorkspace(input.sessionID))
+    if (!isGuardrailTool(input.tool, loaded.config.capture.ignoreTools)) return { resolved: [] }
+
+    const call: CallLike = { tool: input.tool, input: input.input }
+    const candidates = [...state.surfaced.keys()]
+      .map((id) => loaded.guardrails.find((record) => record.id === id))
+      .filter(
+        (record): record is Guardrail =>
+          record !== undefined && record.state !== "dismissed" && fixCandidate(record, call),
+      )
+    if (candidates.length === 0) return { resolved: [] }
+
+    const fixInput = normalizeCall(input.tool, input.input).display
+    let records = loaded.guardrails
+    const resolved: string[] = []
+    for (const record of candidates) {
+      try {
+        records = resolveGuardrail(records, record.id, { input: fixInput }, now().toISOString()).records
+        state.surfaced.delete(record.id)
+        resolved.push(record.id)
+      } catch (error) {
+        deps.debug?.(`auto-resolve skipped ${record.id}: ${String(error)}`)
+      }
+    }
+    if (resolved.length === 0) return { resolved: [] }
+    atomicWrite(loaded.files.guardrails, serializeGuardrails(capGuardrails(records, loaded.config.capture.maxRecords)))
+    commit(loaded, "guardrails")
+    for (const id of resolved) writeAudit(loaded, "resolve", { ref: `g:${id}`, tool: input.tool, fix: fixInput })
+    return { resolved }
+  }
+
+  /** Route one tool outcome: capture failures (+coaching), auto-resolve successes. */
+  async function toolOutcome(input: ToolOutcomeInput): Promise<ToolOutcomeResult> {
+    if (input.status === "error") {
+      const capture = await captureFailure({
+        sessionID: input.sessionID,
+        tool: input.tool,
+        input: input.input,
+        error: input.error,
+      })
+      return { captured: capture.guardrail !== undefined, coached: capture.coached, resolved: [] }
+    }
+    const failure = failureTextFromResult(input.result)
+    if (failure !== undefined) {
+      const capture = await captureFailure({
+        sessionID: input.sessionID,
+        tool: input.tool,
+        input: input.input,
+        error: failure,
+      })
+      return { captured: capture.guardrail !== undefined, coached: capture.coached, resolved: [] }
+    }
+    const resolved = await autoResolve({ sessionID: input.sessionID, tool: input.tool, input: input.input })
+    return { captured: false, coached: false, resolved: resolved.resolved }
   }
 
   function searchMemory(loaded: LoadedWorkspace, query: string, target: SearchTarget = "project", limit = 5): SearchHitDTO[] {
@@ -769,6 +1094,10 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     pin,
     clearPins,
     invalidateBlock,
+    captureFailure,
+    preflight,
+    autoResolve,
+    toolOutcome,
     statusData,
     configView,
     setConfigValue,

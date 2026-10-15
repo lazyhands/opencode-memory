@@ -141,7 +141,7 @@ function storeBlock(name: "PERSONALITY" | "PROJECT", entries: Entry[], cap: numb
   }
 }
 
-function guardrailLine(record: Guardrail): string {
+export function guardrailLine(record: Guardrail): string {
   const fingerprint = truncateLine(record.fingerprint, 60)
   if (record.state === "resolved" && record.fix) {
     return `- \`${fingerprint}\` failed → use \`${record.fix.input}\``
