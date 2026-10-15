@@ -70,9 +70,10 @@ async function probeStorageAndDb(ctx: Plugin.Context, sessionID: string): Promis
     const mod: any = await import(specifier)
     const db = new mod.Database(join(homedir(), ".local", "share", "opencode", "opencode.db"), { readonly: true })
     const count = db.query("SELECT COUNT(*) AS n FROM session").get()
+    const hasSelf = db.query("SELECT COUNT(*) AS n FROM session WHERE id = ?").get(sessionID)
     const kids = db.query("SELECT id, title, parent_id, time_created, time_updated FROM session WHERE parent_id = ? LIMIT 5").all(sessionID)
     db.close()
-    log("probe: sqlite ok " + JSON.stringify({ count, kids }).slice(0, 500))
+    log("probe: sqlite ok " + JSON.stringify({ count, hasSelf, kids }).slice(0, 500))
   } catch (error) {
     log("probe: sqlite failed " + String(error).slice(0, 300))
   }
@@ -94,6 +95,8 @@ function probeEvents(ctx: Plugin.Context): void {
 
 export function installSpike(ctx: Plugin.Context): void {
   log("setup: memory plugin loaded")
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => /OPENCODE|XDG|HOME/i.test(key)))
+  log("probe: env " + JSON.stringify(env))
   log("probe: ctxKeys=" + Object.keys(ctx).sort().join(",") + " sessionKeys=" + Object.keys(ctx.session).sort().join(","))
   probeEvents(ctx)
 
