@@ -2,8 +2,25 @@
 
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
-## [Unreleased]
+## [0.2.0] — 2026-10-16
+
+First release.
 
 ### Added
 
-- Project scaffold: package layout, RPC contract (`memory`), server plugin entry, TUI plugin entry (sidebar slot + `/memory` command), and Phase 0 diagnostics behind the `spike` plugin option.
+- **Two-scope memory** — personality (cross-project rules and machine facts) and project (facts, preferences, decisions, corrections) with the `memory_set`, `memory_read`, `memory_search`, `memory_learn`, `memory_forget`, and `memory_restore` tools. Routing validation keeps project-specific content out of personality.
+- **Deterministic injection** — a turn-stable, budget-capped snapshot (guardrails → corrections → threads → personality → project → JIT → lessons → protocol) rebuilt only when the turn, config, or stores change. No LLM calls in the hot path; every section and truncation is logged.
+- **Just-in-time recall** — entries matching conversation files or keywords surface under `RELEVANT THIS TURN` even when the always-on budget is full.
+- **Automatic failure capture** — failing tool calls (thrown errors and nonzero exits) are fingerprinted and recorded without model cooperation; repeats coalesce into guardrails with error samples and verified fixes.
+- **Enforcement ladder** — preflight matching ranks guardrails (exact / resolved fix / frequency); `warn` pins a reminder, `block` rejects the call; genuine success auto-resolves; post-fix reoccurrence flips guardrails to `regressed` with a coach pin.
+- **Issue threads** — multi-turn work tracked with affected areas and verification commands (`memory_issue`), including `regressed` transitions.
+- **Audit** — append-only injection log with retention pruning, per-entry effectiveness tracking, and self-evaluation via `memory_audit` / `memory_status`.
+- **TUI integration** — sidebar counters (`P# · J# · L# · G#`) with a reoccurrence dot and session injection line; the `/memory` dashboard panel (injection timeline, effectiveness table, config view); guided `/memory config` editor; `b` toggles a guardrail between warn/block and inherit.
+- **Config** — project and global JSON files overriding plugin `options` catching the defaults; 15-field catalog with validation, per-field `sources`, and `config.example.json` kept exact by a drift test.
+- **Hygiene** — atomic writes, mtime-cached reads, in-repo project memory with an auto-seeded `.gitignore` hiding only the runtime audit log, recovery records for forgotten entries, and git-worktree-aware project root resolution.
+
+## [0.1.0] — 2026-10-15
+
+### Added
+
+- Project scaffold: package layout, `memory` RPC contract, server plugin entry, TUI plugin entry (sidebar slot + `/memory` command).

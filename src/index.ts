@@ -15,7 +15,6 @@ import { Plugin } from "@opencode/plugin"
 import { MemoryRpc } from "./rpc.ts"
 import { createRuntime } from "./runtime.ts"
 import { memoryTools } from "./tools.ts"
-import { installSpike } from "./spike.ts"
 import { isMemoryError } from "./core/errors.ts"
 
 export const MEMORY_VERSION = "0.2.0"
@@ -269,12 +268,5 @@ export default Plugin.define({
         debugLog(`execute.after failed: ${String(error)}`)
       }
     })
-
-    // -----------------------------------------------------------------------
-    // Diagnostics (removed in Phase 6)
-    // -----------------------------------------------------------------------
-    if (ctx.options["spike"] === true) {
-      installSpike(ctx)
-    }
   },
 })

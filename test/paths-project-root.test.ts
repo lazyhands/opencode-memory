@@ -1,5 +1,6 @@
 import { test } from "node:test"
 import assert from "node:assert/strict"
+import { execFileSync } from "node:child_process"
 import { mkdirSync, realpathSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { canonicalProjectRoot, clearProjectRootCache } from "../src/core/paths.ts"
@@ -49,4 +50,29 @@ test("cache is cleared without changing results", () => {
   const first = canonicalProjectRoot(dir)
   clearProjectRootCache()
   assert.equal(canonicalProjectRoot(dir), first)
+})
+
+test("a real git worktree resolves to the main worktree root", () => {
+  const base = makeTmpDir()
+  const main = join(base, "main")
+  mkdirSync(main, { recursive: true })
+  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }
+  const git = (...args: string[]): void => {
+    execFileSync("git", ["-C", main, "-c", "commit.gpgsign=false", ...args], { stdio: "pipe", env })
+  }
+  git("init", "-q")
+  git("-c", "user.email=test@test", "-c", "user.name=test", "commit", "--allow-empty", "-qm", "init")
+  const worktree = join(base, "wt")
+  git("worktree", "add", "-q", "--detach", worktree)
+
+  clearProjectRootCache()
+  assert.equal(canonicalProjectRoot(worktree), realpathSync(main))
+
+  const nested = join(worktree, "src", "nested")
+  mkdirSync(nested, { recursive: true })
+  assert.equal(canonicalProjectRoot(nested), realpathSync(main))
+
+  // The main worktree still resolves to itself.
+  clearProjectRootCache()
+  assert.equal(canonicalProjectRoot(main), realpathSync(main))
 })
