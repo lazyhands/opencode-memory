@@ -10,12 +10,11 @@
  * Removed after Phase 0 verification lands.
  */
 import { appendFileSync, mkdirSync } from "node:fs"
+import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
-import { fileURLToPath } from "node:url"
 import type { Plugin } from "@opencode/plugin"
 
-const here = dirname(fileURLToPath(import.meta.url))
-const SPIKE_LOG = process.env["OPENCODE_MEMORY_SPIKE_LOG"] ?? join(here, "..", ".spike", "spike.log")
+const SPIKE_LOG = process.env["OPENCODE_MEMORY_SPIKE_LOG"] ?? join(tmpdir(), "opencode-memory-spike.log")
 
 function log(line: string): void {
   try {
@@ -36,8 +35,47 @@ function summarizeMessage(message: any): unknown {
   return { role: message?.role, content }
 }
 
+/**
+ * Phase 0 probe: what does the runtime session domain actually expose? The
+ * typed surface (SessionDomain) omits `list`/`children`, but the runtime object
+ * may be wider. Read-only calls only.
+ */
+async function probeSessionDomain(ctx: Plugin.Context, sessionID: string): Promise<void> {
+  const session = ctx.session as unknown as Record<string, any>
+  const methods = ["list", "children", "get", "remove", "create", "update", "hook"]
+  log("probe: session methods " + methods.map((name) => `${name}=${typeof session[name]}`).join(" "))
+
+  try {
+    const info = await session["get"]?.({ sessionID })
+    log("probe: session.get ok " + JSON.stringify({ id: info?.id, keys: info && Object.keys(info).slice(0, 12) }).slice(0, 300))
+  } catch (error) {
+    log("probe: session.get failed " + String(error).slice(0, 300))
+  }
+
+  try {
+    const page = await session["list"]?.({})
+    log(
+      "probe: session.list ok " +
+        JSON.stringify({
+          keys: page && typeof page === "object" ? Object.keys(page) : undefined,
+          count: Array.isArray(page?.data) ? page.data.length : undefined,
+        }).slice(0, 300),
+    )
+  } catch (error) {
+    log("probe: session.list failed " + String(error).slice(0, 300))
+  }
+
+  try {
+    const page = await session["list"]?.({ parentID: sessionID })
+    log("probe: session.list(parentID) ok count=" + JSON.stringify(Array.isArray(page?.data) ? page.data.length : page).slice(0, 200))
+  } catch (error) {
+    log("probe: session.list(parentID) failed " + String(error).slice(0, 300))
+  }
+}
+
 export function installSpike(ctx: Plugin.Context): void {
   log("setup: memory plugin loaded")
+  log("probe: ctxKeys=" + Object.keys(ctx).sort().join(",") + " sessionKeys=" + Object.keys(ctx.session).sort().join(","))
 
   ctx.tool.transform((tools) => {
     tools.add({
@@ -96,6 +134,7 @@ export function installSpike(ctx: Plugin.Context): void {
           messages: (event.messages as any[]).slice(-8).map(summarizeMessage),
         }),
     )
+    await probeSessionDomain(ctx, event.sessionID)
   })
 
   ctx.session.hook("compaction", async () => {
