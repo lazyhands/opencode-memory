@@ -179,6 +179,41 @@ const oneOf =
   (v) =>
     typeof v === "string" && allowed.includes(v)
 
+export function isConfigFieldPath(key: string): key is ConfigFieldPath {
+  return (CONFIG_FIELD_PATHS as readonly string[]).includes(key)
+}
+
+/** `null` when the value is valid for the field, otherwise a human-readable reason. */
+export function validateFieldValue(path: ConfigFieldPath, value: unknown): string | null {
+  if (FIELD_VALIDATORS[path](value)) return null
+  const expected: Record<ConfigFieldType, string> = {
+    int: "a positive integer",
+    bool: "true or false",
+    string: "a string",
+    "string[]": "an array of strings",
+  }
+  const field = CONFIG_FIELDS.find((item) => item.path === path)
+  return `"${JSON.stringify(value)}" is invalid for ${path} — expected ${expected[field?.type ?? "string"]}`
+}
+
+/** Read a leaf's effective value from a loaded config (dotted path). */
+export function readFieldValue(config: MemoryConfig, path: ConfigFieldPath): unknown {
+  return getRawField(config as unknown as Record<string, unknown>, path)
+}
+
+/** Deep-set a dotted path on a raw JSON object (for editing config files in place). */
+export function setRawField(target: Record<string, unknown>, path: ConfigFieldPath, value: unknown): void {
+  const parts = path.split(".")
+  let current = target
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i] ?? ""
+    const next = current[part]
+    if (!next || typeof next !== "object" || Array.isArray(next)) current[part] = {}
+    current = current[part] as Record<string, unknown>
+  }
+  current[parts[parts.length - 1] ?? path] = value
+}
+
 const FIELD_VALIDATORS: Record<ConfigFieldPath, Validator> = {
   personalityCharLimit: isPositiveInt,
   projectCharLimit: isPositiveInt,

@@ -1,26 +1,209 @@
+/**
+ * Memory server plugin entry.
+ *
+ * Thin wiring only (ARC-01): the runtime (`runtime.ts`) owns state and
+ * resolution, the tools (`tools.ts`) own model-facing behaviour, the RPC
+ * contract (`rpc.ts`) is shared with the TUI. This file connects them to the
+ * OpenCode plugin surface:
+ *
+ *   - `session.hook("context")`  → turn-stable MEMORY block + JIT relevance
+ *   - `session.hook("compaction")` → invalidate the cached block
+ *   - `tool.transform`            → the nine `memory_*` tools
+ *   - `rpc.register`              → status / config / guardrail / search
+ */
 import { Plugin } from "@opencode/plugin"
 import { MemoryRpc } from "./rpc.ts"
+import { createRuntime } from "./runtime.ts"
+import { memoryTools } from "./tools.ts"
 import { installSpike } from "./spike.ts"
+import { isMemoryError } from "./core/errors.ts"
 
-export const MEMORY_VERSION = "0.1.0"
+export const MEMORY_VERSION = "0.2.0"
 
-/**
- * Memory server plugin.
- *
- * Phase 0: registers the RPC contract and optional diagnostics. The real
- * functionality (stores, injection, tools, hooks) lands in the following phases.
- */
+const DEBUG =
+  process.env["OPENCODE_MEMORY_DEBUG"] === "1" || process.env["OPENCODE_MEMORY_DEBUG"] === "true"
+
+function debugLog(message: string): void {
+  if (!DEBUG) return
+  try {
+    console.error(`[memory] ${message}`)
+  } catch {
+    // diagnostics must never break a session
+  }
+}
+
+function asObject(input: unknown): Record<string, unknown> {
+  return input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
+}
+
 export default Plugin.define({
   id: "memory",
   async setup(ctx) {
-    await ctx.rpc.register(MemoryRpc, {
+    const location = ctx.location as
+      | { directory?: string; project?: { canonical?: string } }
+      | undefined
+
+    /**
+     * Session → working directory. `session.get` is authoritative (sessions
+     * can live anywhere); the plugin instance's location is the fallback for
+     * instance-scoped RPC calls.
+     */
+    const resolveDirectory = async (sessionID?: string): Promise<string> => {
+      if (sessionID) {
+        try {
+          const info = (await ctx.session.get({ sessionID })) as
+            | { location?: { directory?: unknown } }
+            | null
+            | undefined
+          const directory = info?.location?.directory
+          if (typeof directory === "string" && directory !== "") return directory
+        } catch (error) {
+          debugLog(`session.get(${sessionID}) failed: ${String(error)}`)
+        }
+      }
+      const canonical = location?.project?.canonical
+      if (typeof canonical === "string" && canonical !== "") return canonical
+      if (typeof location?.directory === "string" && location.directory !== "") return location.directory
+      return process.cwd()
+    }
+
+    let emitRpc: ((name: string, data: Record<string, unknown>) => void) | undefined
+
+    const runtime = createRuntime({
+      options: ctx.options as Record<string, unknown> | undefined,
+      resolveDirectory,
+      debug: debugLog,
+      emit: (event, data) => {
+        emitRpc?.(event, data)
+      },
+    })
+
+    // -----------------------------------------------------------------------
+    // RPC surface (shared with the TUI)
+    // -----------------------------------------------------------------------
+    const rpc = await ctx.rpc.register(MemoryRpc, {
       ping: async () => ({
         ok: true,
         version: MEMORY_VERSION,
-        directory: ctx.location.directory,
+        directory: location?.directory ?? "",
       }),
+
+      status: async () => runtime.statusData(runtime.load(await runtime.resolveWorkspace())),
+
+      "config.get": async () => runtime.configView(runtime.load(await runtime.resolveWorkspace())),
+
+      "config.set": async (input, context) => {
+        try {
+          const data = asObject(input)
+          return await runtime.setConfigValue({
+            scope: data["scope"] === "global" ? "global" : "project",
+            key: typeof data["key"] === "string" ? data["key"] : String(data["key"] ?? ""),
+            value: data["value"],
+          })
+        } catch (error) {
+          if (isMemoryError(error) && error.code === "invalid_config") {
+            return context.error("invalid_config", error.message, { message: error.message })
+          }
+          throw error
+        }
+      },
+
+      "guardrail.setMode": async (input, context) => {
+        try {
+          const data = asObject(input)
+          return await runtime.setGuardrailMode({
+            id: typeof data["id"] === "string" ? data["id"] : String(data["id"] ?? ""),
+            mode: typeof data["mode"] === "string" ? data["mode"] : String(data["mode"] ?? ""),
+          })
+        } catch (error) {
+          if (isMemoryError(error)) {
+            if (error.code === "not_found") return context.error("not_found", error.message, { message: error.message })
+            if (error.code === "invalid_config") {
+              return context.error("invalid_config", error.message, { message: error.message })
+            }
+          }
+          throw error
+        }
+      },
+
+      search: async (input) => {
+        const data = asObject(input)
+        const query = typeof data["query"] === "string" ? data["query"] : ""
+        const rawTarget = data["target"]
+        const target = rawTarget === "personality" || rawTarget === "all" ? rawTarget : "project"
+        const rawLimit = data["limit"]
+        const limit = typeof rawLimit === "number" && Number.isFinite(rawLimit) ? rawLimit : 5
+        const loaded = runtime.load(await runtime.resolveWorkspace())
+        return { hits: runtime.searchMemory(loaded, query, target, limit) }
+      },
     })
 
+    emitRpc = (name, data) => {
+      try {
+        const emit = rpc.events.emit as unknown as (
+          event: string,
+          payload: Record<string, unknown>,
+        ) => Promise<void>
+        void emit(name, data).catch((error: unknown) => debugLog(`emit ${name} failed: ${String(error)}`))
+      } catch (error) {
+        debugLog(`emit ${name} failed: ${String(error)}`)
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tools
+    // -----------------------------------------------------------------------
+    await ctx.tool.transform((editor) => {
+      for (const tool of memoryTools(runtime)) {
+        editor.add({
+          name: tool.name,
+          description: tool.description,
+          input: tool.input as never,
+          execute: async (input: unknown, context: { sessionID: string }) => {
+            const result = await tool.execute(input, { sessionID: context.sessionID })
+            return {
+              content: result.content,
+              ...(result.metadata ? { metadata: result.metadata } : {}),
+            }
+          },
+        } as never)
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Hooks
+    // -----------------------------------------------------------------------
+
+    // Turn-stable injection: one byte-stable MEMORY block per user turn,
+    // with just-in-time relevance for the current turn's text/paths/commands.
+    await ctx.session.hook("context", async (event) => {
+      try {
+        const result = await runtime.inject({
+          sessionID: event.sessionID,
+          messages: event.messages as unknown as readonly unknown[],
+        })
+        if (!result.block) return
+        const system = event.system as unknown as Array<{ type?: string; text?: string }>
+        runtime.applyToSystem(event.sessionID, system, result.block)
+      } catch (error) {
+        debugLog(`context hook failed: ${String(error)}`)
+      }
+    })
+
+    // Compaction rewrites the message history; force a rebuild for the next
+    // model call so nothing stale or lost survives the compaction.
+    await ctx.session.hook("compaction", async (event) => {
+      try {
+        runtime.invalidateBlock(event.sessionID)
+        runtime.invalidateApplied(event.sessionID)
+      } catch (error) {
+        debugLog(`compaction hook failed: ${String(error)}`)
+      }
+    })
+
+    // -----------------------------------------------------------------------
+    // Diagnostics (removed in Phase 6)
+    // -----------------------------------------------------------------------
     if (ctx.options["spike"] === true) {
       installSpike(ctx)
     }

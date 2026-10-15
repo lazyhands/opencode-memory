@@ -7,9 +7,9 @@
  * written rarely. Writes are atomic (temp + rename, DAT-02 single-writer),
  * so readers never observe partial files.
  */
-import { mkdirSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
+import { mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join, resolve } from "node:path"
+import { basename, dirname, join, resolve } from "node:path"
 
 export interface PathEnv {
   /** Overrides `os.homedir()` (tests). */
@@ -43,6 +43,73 @@ export function globalMemoryDir(env: PathEnv = {}): string {
 /** Project memory directory: `<projectRoot>/.opencode/memory`. */
 export function projectMemoryDir(projectRoot: string): string {
   return join(resolve(projectRoot), ".opencode", "memory")
+}
+
+// ---------------------------------------------------------------------------
+// Project root resolution (worktree-aware)
+// ---------------------------------------------------------------------------
+
+const projectRootCache = new Map<string, string>()
+
+function realpathOrSelf(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return path
+  }
+}
+
+/**
+ * Canonical project root for a working directory.
+ *
+ * Walks up to the nearest `.git`:
+ *   - `.git` directory → that directory is the repo root;
+ *   - `.git` file (a git worktree) → parse `gitdir:` and resolve the *main*
+ *     worktree root, so all worktrees of one repo share one project memory;
+ *   - nothing found → the directory itself (realpath'd).
+ *
+ * Deterministic and pure modulo the filesystem; cached per directory.
+ */
+export function canonicalProjectRoot(directory: string): string {
+  const resolved = realpathOrSelf(resolve(directory))
+  const cached = projectRootCache.get(resolved)
+  if (cached !== undefined) return cached
+  const root = findProjectRoot(resolved)
+  projectRootCache.set(resolved, root)
+  return root
+}
+
+function findProjectRoot(start: string): string {
+  let dir = start
+  for (;;) {
+    const gitPath = join(dir, ".git")
+    let stat: ReturnType<typeof statSync> | null = null
+    try {
+      stat = statSync(gitPath)
+    } catch {
+      stat = null
+    }
+    if (stat?.isDirectory()) return dir
+    if (stat?.isFile()) {
+      const text = readText(gitPath)
+      const match = text?.match(/^gitdir:\s*(.+?)\s*$/m)
+      const gitdir = match?.[1] ? realpathOrSelf(resolve(dir, match[1])) : null
+      if (gitdir) {
+        const worktree = /^(.*)[/\\]\.git[/\\]worktrees[/\\][^/\\]+$/.exec(gitdir)
+        if (worktree?.[1]) return realpathOrSelf(worktree[1])
+        if (basename(gitdir) === ".git") return realpathOrSelf(dirname(gitdir))
+      }
+      return dir
+    }
+    const parent = dirname(dir)
+    if (parent === dir) return start
+    dir = parent
+  }
+}
+
+/** Test/maintenance hook — forget cached project roots. */
+export function clearProjectRootCache(): void {
+  projectRootCache.clear()
 }
 
 export function personalityPath(globalDir: string): string {

@@ -1,21 +1,49 @@
 import { Rpc } from "@opencode/plugin"
 
 /**
- * Shared RPC contract between the memory server plugin and the memory TUI plugin.
+ * Shared RPC contract between the memory server plugin and the memory TUI.
  *
  * Pure JSON Schema only — importable by clients (and other plugins) without
- * loading the implementation. The `./rpc` package export publishes this contract.
+ * loading the implementation. The `./rpc` package export publishes it.
+ *
+ * Every method's output mirrors a `runtime.ts` DTO exactly (the RPC host
+ * encodes outputs through these schemas). Fields that may be absent are
+ * optional; extra detail is added conservatively.
  */
+
+const emptyInput = {
+  type: "object",
+  properties: {},
+  required: [],
+  additionalProperties: false,
+} as const
+
+/** Effective config view: flattened values, per-field source, loader warnings. */
+const configView = {
+  type: "object",
+  properties: {
+    values: { type: "object", description: "Effective values keyed by dotted config path" },
+    sources: { type: "object", description: "Source label per dotted config path" },
+    warnings: { type: "array", items: { type: "string" } },
+  },
+  required: ["values", "sources", "warnings"],
+} as const
+
+const usageEntry = {
+  type: "object",
+  properties: {
+    entries: { type: "integer" },
+    chars: { type: "integer" },
+    cap: { type: "integer" },
+  },
+  required: ["entries", "chars", "cap"],
+} as const
+
 export const MemoryRpc = Rpc.define({
   id: "memory",
   methods: {
     ping: {
-      input: {
-        type: "object",
-        properties: {},
-        required: [],
-        additionalProperties: false,
-      },
+      input: emptyInput,
       output: {
         type: "object",
         properties: {
@@ -27,15 +55,180 @@ export const MemoryRpc = Rpc.define({
         additionalProperties: false,
       },
     },
+
+    /** Full health snapshot for the instance's workspace. */
+    status: {
+      input: emptyInput,
+      output: {
+        type: "object",
+        properties: {
+          projectRoot: { type: "string" },
+          projectDir: { type: "string" },
+          globalDir: { type: "string" },
+          sessionID: { type: "string" },
+          config: configView,
+          usage: {
+            type: "object",
+            properties: {
+              personality: usageEntry,
+              project: usageEntry,
+              lessons: { type: "integer" },
+              threads: {
+                type: "object",
+                properties: {
+                  open: { type: "integer" },
+                  fixed: { type: "integer" },
+                  verifying: { type: "integer" },
+                  regressed: { type: "integer" },
+                  closed: { type: "integer" },
+                  active: { type: "array", items: { type: "string" } },
+                },
+                required: ["open", "fixed", "verifying", "regressed", "closed", "active"],
+              },
+              guardrails: { type: "object" },
+            },
+            required: ["personality", "project", "lessons", "threads", "guardrails"],
+          },
+          audit: {
+            type: "object",
+            properties: {
+              injections: { type: "integer" },
+              sessions: { type: "integer" },
+              failures: { type: "integer" },
+              resolves: { type: "integer" },
+              searches: { type: "integer" },
+            },
+            required: ["injections", "sessions", "failures", "resolves", "searches"],
+          },
+          lint: { type: "array", items: { type: "string" } },
+        },
+        required: ["projectRoot", "projectDir", "globalDir", "config", "usage", "audit", "lint"],
+      },
+    },
+
+    /** Effective config (values + sources + warnings). */
+    "config.get": {
+      input: emptyInput,
+      output: configView,
+    },
+
+    /** Validate + persist one config leaf, then return the new effective view. */
+    "config.set": {
+      input: {
+        type: "object",
+        properties: {
+          scope: { type: "string", enum: ["global", "project"] },
+          key: { type: "string", description: "Dotted config path, e.g. guardrails.mode" },
+          value: { description: "New value (validated server-side against the field)" },
+        },
+        required: ["scope", "key", "value"],
+        additionalProperties: false,
+      },
+      output: configView,
+      errors: {
+        invalid_config: {
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        },
+      },
+    },
+
+    /** Per-guardrail enforcement mode (inherit uses the global config mode). */
+    "guardrail.setMode": {
+      input: {
+        type: "object",
+        properties: {
+          id: { type: "string", description: "Guardrail id like g3 or #g3" },
+          mode: { type: "string", enum: ["inherit", "warn", "block"] },
+        },
+        required: ["id", "mode"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          mode: { type: "string" },
+          state: { type: "string" },
+        },
+        required: ["id", "mode", "state"],
+        additionalProperties: false,
+      },
+      errors: {
+        not_found: {
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        },
+        invalid_config: {
+          type: "object",
+          properties: { message: { type: "string" } },
+          required: ["message"],
+        },
+      },
+    },
+
+    /** Keyword recall across the stores (same engine as the memory_search tool). */
+    search: {
+      input: {
+        type: "object",
+        properties: {
+          query: { type: "string" },
+          target: { type: "string", enum: ["project", "personality", "all"] },
+          limit: { type: "integer" },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+      output: {
+        type: "object",
+        properties: {
+          hits: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                name: { type: "string" },
+                snippet: { type: "string" },
+                score: { type: "number" },
+                ref: { type: "string" },
+              },
+              required: ["name", "snippet", "score", "ref"],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ["hits"],
+      },
+    },
   },
+
   events: {
+    /** Emitted after every mutation (settle-on-write). */
     changed: {
       schema: {
         type: "object",
         properties: {
           scope: { type: "string" },
+          projectRoot: { type: "string" },
         },
         required: ["scope"],
+        additionalProperties: false,
+      },
+    },
+    /** Emitted when a new turn-stable injection block is built and logged. */
+    injected: {
+      schema: {
+        type: "object",
+        properties: {
+          sessionID: { type: "string" },
+          turnKey: { type: "string" },
+          hash: { type: "string" },
+          chars: { type: "integer" },
+          sections: { type: "integer" },
+        },
+        required: ["sessionID", "hash", "chars"],
         additionalProperties: false,
       },
     },
