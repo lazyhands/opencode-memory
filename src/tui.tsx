@@ -1,3 +1,4 @@
+/** @jsxImportSource @opentui/solid */
 import { Plugin } from "@opencode/plugin/tui"
 import { MemoryRpc } from "./rpc.ts"
 
@@ -11,6 +12,9 @@ import { MemoryRpc } from "./rpc.ts"
 export default Plugin.define({
   id: "memory.tui",
   setup(context) {
+    // Temporary Phase 0 diagnostic: proves the TUI part loaded (remove in Phase 5).
+    context.ui.toast.show({ message: "memory TUI loaded", variant: "success" })
+
     context.ui.slot({
       append: "sidebar.content",
       render: () => (
