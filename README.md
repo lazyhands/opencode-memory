@@ -95,7 +95,7 @@ Resolution order (first wins): project `<project>/.opencode/memory/config.json` 
 
 ## Files
 
-Project scope (`<project>/.opencode/memory/`): `entries.json`, `learnings.json`, `guardrails.jsonl`, `issues.json`, `config.json`, `audit.jsonl` (runtime log, auto-gitignored), plus timestamped recovery records under `recovery/` when entries are forgotten. Personality scope mirrors this in `~/.config/opencode/memory/`. All writes are atomic (temp + rename), reads are cached by mtime — safe across concurrent sessions.
+Project scope (`<project>/.opencode/memory/`): `project.md`, `learnings.md`, `issues.md`, `guardrails.jsonl`, `config.json`, and `audit.jsonl` (runtime log, auto-gitignored); forgotten entries are kept under `recovery/`. The personality scope lives in `~/.config/opencode/memory/` (`personality.md`, `config.json`). All writes are atomic (temp + rename), reads are cached by mtime — safe across concurrent sessions.
 
 ## Troubleshooting
 
