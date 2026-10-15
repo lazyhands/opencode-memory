@@ -10,7 +10,7 @@
  * Removed after Phase 0 verification lands.
  */
 import { appendFileSync, mkdirSync } from "node:fs"
-import { tmpdir } from "node:os"
+import { tmpdir, homedir } from "node:os"
 import { dirname, join } from "node:path"
 import type { Plugin } from "@opencode/plugin"
 
@@ -51,31 +51,51 @@ async function probeSessionDomain(ctx: Plugin.Context, sessionID: string): Promi
   } catch (error) {
     log("probe: session.get failed " + String(error).slice(0, 300))
   }
+}
 
+/** Phase 0 probe: plugin storage + direct sqlite read (session-manager needs an enumeration path). */
+async function probeStorageAndDb(ctx: Plugin.Context, sessionID: string): Promise<void> {
   try {
-    const page = await session["list"]?.({})
+    const res: any = await ctx.storage.scan({ prefix: "", limit: 10 })
     log(
-      "probe: session.list ok " +
-        JSON.stringify({
-          keys: page && typeof page === "object" ? Object.keys(page) : undefined,
-          count: Array.isArray(page?.data) ? page.data.length : undefined,
-        }).slice(0, 300),
+      "probe: storage.scan ok " +
+        JSON.stringify({ entries: res?.entries?.length, next: res?.next, sample: res?.entries?.slice(0, 3) }).slice(0, 400),
     )
   } catch (error) {
-    log("probe: session.list failed " + String(error).slice(0, 300))
+    log("probe: storage.scan failed " + String(error).slice(0, 300))
   }
 
+  const specifier = "bun:sqlite"
   try {
-    const page = await session["list"]?.({ parentID: sessionID })
-    log("probe: session.list(parentID) ok count=" + JSON.stringify(Array.isArray(page?.data) ? page.data.length : page).slice(0, 200))
+    const mod: any = await import(specifier)
+    const db = new mod.Database(join(homedir(), ".local", "share", "opencode", "opencode.db"), { readonly: true })
+    const count = db.query("SELECT COUNT(*) AS n FROM session").get()
+    const kids = db.query("SELECT id, title, parent_id, time_created, time_updated FROM session WHERE parent_id = ? LIMIT 5").all(sessionID)
+    db.close()
+    log("probe: sqlite ok " + JSON.stringify({ count, kids }).slice(0, 500))
   } catch (error) {
-    log("probe: session.list(parentID) failed " + String(error).slice(0, 300))
+    log("probe: sqlite failed " + String(error).slice(0, 300))
   }
+}
+
+/** Phase 0 probe: can the plugin observe the server event stream? */
+function probeEvents(ctx: Plugin.Context): void {
+  void (async () => {
+    try {
+      for await (const event of ctx.event.subscribe()) {
+        log("probe: event " + JSON.stringify({ type: (event as any)?.type, keys: event && Object.keys(event) }).slice(0, 300))
+        break
+      }
+    } catch (error) {
+      log("probe: event subscribe failed " + String(error).slice(0, 300))
+    }
+  })()
 }
 
 export function installSpike(ctx: Plugin.Context): void {
   log("setup: memory plugin loaded")
   log("probe: ctxKeys=" + Object.keys(ctx).sort().join(",") + " sessionKeys=" + Object.keys(ctx.session).sort().join(","))
+  probeEvents(ctx)
 
   ctx.tool.transform((tools) => {
     tools.add({
@@ -135,6 +155,7 @@ export function installSpike(ctx: Plugin.Context): void {
         }),
     )
     await probeSessionDomain(ctx, event.sessionID)
+    await probeStorageAndDb(ctx, event.sessionID)
   })
 
   ctx.session.hook("compaction", async () => {
