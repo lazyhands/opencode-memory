@@ -1,0 +1,25 @@
+{
+  "personalityCharLimit": 1500,
+  "projectCharLimit": 4000,
+  "perEntryCharLimit": 180,
+  "maxEntryLines": 3,
+  "maxInjectChars": 2400,
+  "jit": true,
+  "learnings": {
+    "maxIndexTitles": 12
+  },
+  "capture": {
+    "toolErrors": true,
+    "ignoreTools": [],
+    "maxRecords": 200
+  },
+  "guardrails": {
+    "mode": "warn"
+  },
+  "autoDistillOnCompact": false,
+  "audit": {
+    "enabled": true,
+    "retentionDays": 30
+  },
+  "protocol": "full"
+}

@@ -1,0 +1,48 @@
+{
+  "name": "@deepakjangra/opencode-memory",
+  "version": "0.1.0",
+  "description": "Durable cross-session memory for OpenCode: personality and project scopes, learnings, auto-captured guardrails, issue threads, and an injection audit dashboard.",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "plugin",
+    "memory",
+    "learnings",
+    "guardrails",
+    "ai-memory"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/DeepakJangra239/opencode-memory.git"
+  },
+  "homepage": "https://github.com/DeepakJangra239/opencode-memory#readme",
+  "bugs": {
+    "url": "https://github.com/DeepakJangra239/opencode-memory/issues"
+  },
+  "exports": {
+    ".": "./src/index.ts",
+    "./tui": "./src/tui.tsx",
+    "./rpc": "./src/rpc.ts"
+  },
+  "files": [
+    "src",
+    "config.example.json",
+    "CHANGELOG.md"
+  ],
+  "scripts": {
+    "check": "tsc --noEmit",
+    "test": "node --test test/"
+  },
+  "devDependencies": {
+    "@opencode/client": "2.0.29",
+    "@opencode/plugin": "2.0.29",
+    "@opencode/theme": "2.0.29",
+    "@opentui/core": "0.5.17",
+    "@opentui/solid": "0.5.17",
+    "@types/node": "26.6.5",
+    "solid-js": "1.9.12",
+    "typescript": "5.8.2"
+  }
+}
