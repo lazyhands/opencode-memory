@@ -1,12 +1,13 @@
 /**
- * Snapshot builder: the injected MEMORY block (req 2 + 3 + 5 core).
+ * Snapshot builder: the injected MEMORY block.
  *
  * Deterministic: the same stores + config + turn context produce a
  * byte-identical block (no timestamps) — safe for provider prompt caching.
- * Sections render in the plan's priority order:
+ * Sections render in priority order:
  *
  *   1 [GUARDRAILS]  2 [PERSONALITY]  3 [OPEN THREADS]  4 [CORRECTIONS]
- *   5 [PROJECT]     6 [LESSONS]      7 [RELEVANT THIS TURN]  8 [MEMORY PROTOCOL]
+ *   5 [PROJECT]     6 [LESSONS]      7 [RELEVANT THIS TURN]  8 [DISTILL]
+ *   9 [MEMORY PROTOCOL]
  *
  * Packing reserves the small, high-value sections first (guardrails,
  * corrections, open threads), then the bounded stores, then turn relevance;
@@ -29,9 +30,10 @@ export type SectionName =
   | "PROJECT"
   | "LESSONS"
   | "RELEVANT THIS TURN"
+  | "DISTILL"
   | "MEMORY PROTOCOL"
 
-/** Render order of sections inside the block (plan §Injection model). */
+/** Render order of sections inside the block. */
 export const SECTION_RENDER_ORDER: readonly SectionName[] = [
   "GUARDRAILS",
   "PERSONALITY",
@@ -40,6 +42,7 @@ export const SECTION_RENDER_ORDER: readonly SectionName[] = [
   "PROJECT",
   "LESSONS",
   "RELEVANT THIS TURN",
+  "DISTILL",
   "MEMORY PROTOCOL",
 ]
 
@@ -48,6 +51,7 @@ export const PACK_ORDER: readonly SectionName[] = [
   "GUARDRAILS",
   "CORRECTIONS",
   "OPEN THREADS",
+  "DISTILL",
   "PERSONALITY",
   "PROJECT",
   "RELEVANT THIS TURN",
@@ -87,8 +91,10 @@ export interface SnapshotInputs {
   /** Defaults to project entries with kind=correction. */
   corrections?: Entry[] | undefined
   jit?: JitMatch[] | undefined
-  /** Pre-flight/coach pins (Phase 3) — always rendered first in RELEVANT. */
+  /** Pre-flight/coach pins — always rendered first in RELEVANT. */
   pins?: SnapshotPin[] | undefined
+  /** One-line distillation request after a context compaction. */
+  distill?: boolean | undefined
 }
 
 export interface SnapshotSectionInfo {
@@ -270,6 +276,14 @@ function protocolBlock(mode: ProtocolMode): SectionBlock | null {
   return { name: "MEMORY PROTOCOL", header: null, items: [{ lines: text.split("\n"), refs: [] }] }
 }
 
+const DISTILL_LINE =
+  "Compaction ran — distill this session now: record each durable lesson via memory_learn (brief title + 1-2 line takeaway; failures → what prevents a repeat)."
+
+function distillBlock(pending: boolean): SectionBlock | null {
+  if (!pending) return null
+  return { name: "DISTILL", header: "[DISTILL]", items: [{ lines: [DISTILL_LINE], refs: [] }] }
+}
+
 export function buildSections(inputs: SnapshotInputs): SectionBlock[] {
   const corrections = inputs.corrections ?? inputs.project.filter((entry) => entry.kind === "correction")
   const projectEntries = inputs.project.filter((entry) => entry.kind !== "correction")
@@ -281,6 +295,7 @@ export function buildSections(inputs: SnapshotInputs): SectionBlock[] {
     storeBlock("PROJECT", projectEntries, inputs.config.projectCharLimit, "j"),
     lessonsBlock(inputs.lessons, inputs.config),
     relevantBlock(inputs.jit ?? [], inputs.pins ?? [], new Set()),
+    distillBlock(inputs.distill ?? false),
     protocolBlock(inputs.config.protocol),
   ]
   return blocks.filter((block): block is SectionBlock => block !== null)

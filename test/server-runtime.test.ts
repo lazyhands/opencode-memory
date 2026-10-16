@@ -132,6 +132,32 @@ test("invalidateBlock forces a rebuild (compaction path)", async () => {
   assert.equal(rebuilt.rebuilt, true)
 })
 
+test("noteCompaction requests one distillation pass when autoDistillOnCompact is on", async () => {
+  const fx = makeServerFixture()
+  seedStores(fx)
+  const messages = [{ role: "user", id: "msg_d", content: [{ type: "text", text: "hello" }] }]
+  const before = await fx.runtime.inject({ sessionID: "ses_distill", messages })
+  assert.ok(!before.block?.includes("[DISTILL]"))
+
+  await fx.runtime.setConfigValue({ scope: "project", key: "autoDistillOnCompact", value: true })
+  await fx.runtime.noteCompaction("ses_distill")
+  fx.runtime.invalidateBlock("ses_distill")
+  const after = await fx.runtime.inject({ sessionID: "ses_distill", messages })
+  assert.ok(after.block?.includes("[DISTILL]"))
+
+  // Same turn → the block carrying the request stays byte-stable.
+  const stable = await fx.runtime.inject({ sessionID: "ses_distill", messages })
+  assert.equal(stable.rebuilt, false)
+  assert.equal(stable.block, after.block)
+
+  // Next turn → the request is consumed and gone.
+  const nextTurn = await fx.runtime.inject({
+    sessionID: "ses_distill",
+    messages: [...messages, { role: "assistant", content: [] }, { role: "user", id: "msg_e", content: [{ type: "text", text: "next" }] }],
+  })
+  assert.ok(!nextTurn.block?.includes("[DISTILL]"))
+})
+
 test("config changes rebuild the block even without a new turn", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
@@ -356,7 +382,7 @@ test("runtime is constructible without options", async () => {
 })
 
 // ---------------------------------------------------------------------------
-// TUI-facing DTOs (Phase 5)
+// TUI-facing DTOs
 // ---------------------------------------------------------------------------
 
 test("guardrailList and status expose reoccurring guardrails; configView carries the catalog", async () => {

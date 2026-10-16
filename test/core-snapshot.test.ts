@@ -30,7 +30,7 @@ function inputs(overrides: Partial<SnapshotInputs> = {}): SnapshotInputs {
   }
 }
 
-test("renders sections in the plan's priority order", () => {
+test("renders sections in priority order", () => {
   const snapshot = buildSnapshot(
     inputs({
       personality: [entry("rule", "Always research before working")],
@@ -56,6 +56,16 @@ test("renders sections in the plan's priority order", () => {
   assert.ok(snapshot.block.includes(PROTOCOL_FULL))
   assert.ok(snapshot.refs.some((ref) => ref.startsWith("g:g1")))
   assert.equal(snapshot.truncations.length, 0)
+})
+
+test("distill request renders a one-line DISTILL section only when pending", () => {
+  const pending = buildSnapshot(inputs({ distill: true }))
+  assert.ok(pending.block.includes("[DISTILL]"))
+  assert.ok(pending.sections.some((section) => section.name === "DISTILL"))
+
+  const off = buildSnapshot(inputs())
+  assert.ok(!off.block.includes("[DISTILL]"))
+  assert.ok(!off.sections.some((section) => section.name === "DISTILL"))
 })
 
 test("is byte-stable across repeated builds", () => {

@@ -209,6 +209,7 @@ const SECTION_REASON: Record<SectionName, string> = {
   PROJECT: "always",
   LESSONS: "always",
   "RELEVANT THIS TURN": "jit",
+  DISTILL: "post-compaction",
   "MEMORY PROTOCOL": "always",
 }
 
@@ -273,6 +274,8 @@ interface SessionState {
   pins: SnapshotPin[]
   pinsVersion: number
   blockPinsVersion: number
+  /** A distillation pass was requested by the last compaction (opt-in). */
+  pendingDistill: boolean
   /** Guardrail ids surfaced to the model this session (id → last surfaced at). */
   surfaced: Map<string, string>
   inFlight?: Promise<InjectionResult> | undefined
@@ -398,6 +401,8 @@ export interface MemoryRuntime {
   clearPins(sessionID: string): void
   /** Invalidate the cached block for a session (compaction). */
   invalidateBlock(sessionID: string): void
+  /** Request a distillation pass in the next injected block (compaction, opt-in). */
+  noteCompaction(sessionID: string): Promise<void>
   /** Failure capture + coaching (`execute.after` → status error). */
   captureFailure(input: { sessionID: string; tool: string; input: unknown; error: unknown }): Promise<CaptureResult>
   /** Pre-flight match (`execute.before`): warn pin or block message. */
@@ -527,6 +532,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
         pins: [],
         pinsVersion: 0,
         blockPinsVersion: 0,
+        pendingDistill: false,
         surfaced: new Map(),
       }
       sessions.set(sessionID, state)
@@ -679,7 +685,11 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       guardrails: loaded.guardrails,
       jit,
       pins: state.pins,
+      ...(state.pendingDistill ? { distill: true } : {}),
     })
+    // The distillation request rides exactly one built block; later turns
+    // go back to normal until the next compaction asks again.
+    state.pendingDistill = false
 
     state.turnKey = turnKey
     state.block = snapshot.block
@@ -816,6 +826,12 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     state.block = undefined
     state.blockHash = undefined
     state.blockEpoch = -1
+  }
+
+  /** After a compaction, ask the next built block to prompt a distillation pass (opt-in). */
+  async function noteCompaction(sessionID: string): Promise<void> {
+    const loaded = load(await resolveWorkspace(sessionID))
+    if (loaded.config.autoDistillOnCompact) sessionState(sessionID).pendingDistill = true
   }
 
   function configView(loaded: LoadedWorkspace): ConfigView {
@@ -1271,6 +1287,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     pin,
     clearPins,
     invalidateBlock,
+    noteCompaction,
     captureFailure,
     preflight,
     autoResolve,
