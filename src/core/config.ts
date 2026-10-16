@@ -13,6 +13,7 @@ import { readText } from "./paths.ts"
 
 export type ProtocolMode = "full" | "short" | "off"
 export type GuardrailMode = "warn" | "block"
+export type SidebarMode = "compact" | "full" | "off"
 
 export interface MemoryConfig {
   personalityCharLimit: number
@@ -27,6 +28,7 @@ export interface MemoryConfig {
   autoDistillOnCompact: boolean
   audit: { enabled: boolean; retentionDays: number }
   protocol: ProtocolMode
+  tui: { sidebar: SidebarMode }
 }
 
 export const DEFAULT_CONFIG: MemoryConfig = {
@@ -42,6 +44,7 @@ export const DEFAULT_CONFIG: MemoryConfig = {
   autoDistillOnCompact: false,
   audit: { enabled: true, retentionDays: 30 },
   protocol: "full",
+  tui: { sidebar: "compact" },
 }
 
 export type ConfigFieldType = "int" | "bool" | "string" | "string[]"
@@ -63,6 +66,7 @@ export type ConfigFieldPath =
   | "audit.enabled"
   | "audit.retentionDays"
   | "protocol"
+  | "tui.sidebar"
 
 export interface ConfigField {
   path: ConfigFieldPath
@@ -87,6 +91,7 @@ export const CONFIG_FIELDS: readonly ConfigField[] = [
   { path: "audit.enabled", type: "bool", description: "Write audit.jsonl events" },
   { path: "audit.retentionDays", type: "int", description: "Audit log retention window" },
   { path: "protocol", type: "string", description: "Injected protocol text: full | short | off" },
+  { path: "tui.sidebar", type: "string", description: "Sidebar widget: compact | full | off" },
 ]
 
 export const CONFIG_FIELD_PATHS: readonly ConfigFieldPath[] = CONFIG_FIELDS.map((f) => f.path)
@@ -166,6 +171,9 @@ function setField(config: MemoryConfig, path: ConfigFieldPath, value: unknown): 
     case "protocol":
       config.protocol = value as ProtocolMode
       break
+    case "tui.sidebar":
+      config.tui.sidebar = value as SidebarMode
+      break
   }
 }
 
@@ -230,6 +238,7 @@ const FIELD_VALIDATORS: Record<ConfigFieldPath, Validator> = {
   "audit.enabled": isBoolean,
   "audit.retentionDays": isPositiveInt,
   protocol: oneOf("full", "short", "off"),
+  "tui.sidebar": oneOf("compact", "full", "off"),
 }
 
 // ---------------------------------------------------------------------------

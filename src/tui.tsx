@@ -2,9 +2,9 @@
 /**
  * Memory TUI plugin: visibility for what memory does.
  *
- * - `sidebar.content`: two-line live counter (personality/project/lessons/
- *   guardrails + the session's last injection size and JIT hits). A red dot
- *   marks unresolved reoccurrences.
+ * - `sidebar.content`: a plain-language memory widget (`<n> memories`,
+ *   recalls this turn, red attention line) whose verbosity follows the
+ *   `tui.sidebar` config field: compact | full | off.
  * - `session.panel` via `/memory`: the audit dashboard — injection timeline,
  *   per-entry effectiveness, effective config — with keyboard navigation.
  * - `/memory config [field]`: guided editor that writes through the RPC.
@@ -14,7 +14,17 @@
  */
 import { createEffect, createSignal, Show } from "solid-js"
 import { Plugin } from "@opencode/plugin/tui"
-import { displayValue, editableValue, errorLine, memoryClient, parseFieldText } from "./tui-rpc.ts"
+import {
+  displayValue,
+  editableValue,
+  errorLine,
+  memoryClient,
+  parseFieldText,
+  sidebarMode,
+  sidebarSummary,
+  scopeBreakdown,
+  attentionLine,
+} from "./tui-rpc.ts"
 import type { MemoryTuiClient } from "./tui-rpc.ts"
 import { MemoryDashboard } from "./tui-dashboard.tsx"
 import type { DashboardData, MemoryTab, SelectedRow } from "./tui-dashboard.tsx"
@@ -28,9 +38,25 @@ interface SideData {
 }
 
 /** Fields with a closed value set get a picker instead of a text prompt. */
-const ENUM_FIELDS: Record<string, readonly string[]> = {
-  "guardrails.mode": ["warn", "block"],
-  protocol: ["full", "short", "off"],
+interface EnumChoice {
+  value: string
+  description: string
+}
+const ENUM_FIELDS: Record<string, readonly EnumChoice[]> = {
+  "guardrails.mode": [
+    { value: "warn", description: "pin a reminder before calls that failed before (default)" },
+    { value: "block", description: "reject matching calls before they run" },
+  ],
+  protocol: [
+    { value: "full", description: "full behavior protocol in the injected block (default)" },
+    { value: "short", description: "condensed protocol text" },
+    { value: "off", description: "no protocol text injected" },
+  ],
+  "tui.sidebar": [
+    { value: "compact", description: "one summary line — counts + recalls (default)" },
+    { value: "full", description: "scope breakdown + injection size" },
+    { value: "off", description: "hide the sidebar widget" },
+  ],
 }
 
 export default Plugin.define({
@@ -89,16 +115,18 @@ export default Plugin.define({
       }
     }
 
-    const injectionLine = (data: SideData): string => {
-      const event = data.lastInjection
-      if (event === undefined) return "no injection yet"
-      const relevant = event.sections.find((section) => section.name === "RELEVANT THIS TURN")
-      const jit =
-        relevant !== undefined
-          ? Object.values(relevant.why ?? {}).filter((reason) => reason.startsWith("jit:")).length
-          : 0
-      const tokens = Math.max(1, Math.round(event.chars / 4))
-      return `inj ${tokens} tok · jit ${jit}`
+    const summary = () => {
+      const data = side()
+      if (data === undefined) return undefined
+      return sidebarSummary({
+        usage: data.status.usage,
+        lastInjection: data.lastInjection,
+        mode: sidebarMode(data.status.config.values),
+      })
+    }
+    const hasContent = (): boolean => {
+      const data = summary()
+      return data !== undefined && (data.lines.length > 0 || data.attention !== undefined)
     }
 
     context.ui.slot({
@@ -109,36 +137,22 @@ export default Plugin.define({
           void rev()
           void loadSide(sessionID)
         })
-        const counters = (): string | undefined => {
-          const data = side()
-          if (data === undefined) return undefined
-          const usage = data.status.usage
-          const guardrails = Object.values(usage.guardrails).reduce((sum, value) => sum + value, 0)
-          return `P${usage.personality.entries} · J${usage.project.entries} · L${usage.lessons} · G${guardrails}`
-        }
-        const reoccurring = () => side()?.status.usage.reoccurring ?? 0
-        const injection = (): string | undefined => {
-          const data = side()
-          return data !== undefined ? injectionLine(data) : undefined
-        }
         return (
           <box flexDirection="column">
-            <text fg={context.theme.text.base}>memory</text>
-            <Show
-              when={counters() !== undefined}
-              fallback={
-                <text fg={context.theme.text.muted}>{sideError() !== undefined ? "unavailable" : "…"}</text>
-              }
-            >
-              <box flexDirection="column">
-                <box flexDirection="row">
-                  <text fg={context.theme.text.muted}>{counters() ?? ""}</text>
-                  <Show when={reoccurring() > 0}>
-                    <text fg={context.theme.text.feedback.error.base}>{` ●${reoccurring()}`}</text>
-                  </Show>
-                </box>
-                <text fg={context.theme.text.muted}>{injection() ?? ""}</text>
-              </box>
+            <Show when={summary() === undefined}>
+              <text fg={context.theme.text.muted}>{sideError() !== undefined ? "unavailable" : "loading…"}</text>
+            </Show>
+            <Show when={hasContent()}>
+              <text fg={context.theme.text.base}>memory</text>
+              <Show when={summary()?.lines[0] !== undefined}>
+                <text fg={context.theme.text.muted}>{summary()?.lines[0] ?? ""}</text>
+              </Show>
+              <Show when={summary()?.lines[1] !== undefined}>
+                <text fg={context.theme.text.muted}>{summary()?.lines[1] ?? ""}</text>
+              </Show>
+              <Show when={summary()?.attention !== undefined}>
+                <text fg={context.theme.text.feedback.error.base}>{`● ${summary()?.attention ?? ""}`}</text>
+              </Show>
             </Show>
           </box>
         )
@@ -281,7 +295,11 @@ export default Plugin.define({
         if (enumValues !== undefined) {
           value = await context.ui.dialog.select<string>({
             title: field.path,
-            options: enumValues.map((option) => ({ title: option, value: option })),
+            options: enumValues.map((option) => ({
+              title: option.value,
+              value: option.value,
+              description: option.description,
+            })),
             ...(typeof view.values[path] === "string" ? { current: view.values[path] as string } : {}),
           })
           if (value === undefined) return
@@ -415,10 +433,10 @@ export default Plugin.define({
               try {
                 const sessionID = memorySession()
                 const status = await client.status(sessionID)
-                const usage = status.usage
-                const guardrails = Object.values(usage.guardrails).reduce((sum, value) => sum + value, 0)
+                const attention = attentionLine(status.usage)
+                const suffix = attention !== undefined ? ` · ${attention}` : ""
                 context.ui.toast.show({
-                  message: `memory · ${status.projectRoot} · P${usage.personality.entries} J${usage.project.entries} L${usage.lessons} G${guardrails}${usage.reoccurring > 0 ? ` ●${usage.reoccurring}` : ""}`,
+                  message: `memory · ${status.projectRoot} · ${scopeBreakdown(status.usage)}${suffix}`,
                   variant: "success",
                 })
               } catch (error) {

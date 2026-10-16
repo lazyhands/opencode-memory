@@ -8,7 +8,7 @@
 import { createEffect, createMemo, For, Show } from "solid-js"
 import type { Accessor } from "solid-js"
 import type { Plugin } from "@opencode/plugin/tui"
-import { displayValue } from "./tui-rpc.ts"
+import { displayValue, totalsSummary } from "./tui-rpc.ts"
 import type { MemoryTuiClient } from "./tui-rpc.ts"
 
 export type MemoryTab = "injections" | "effectiveness" | "config"
@@ -122,10 +122,7 @@ export function MemoryDashboard(props: DashboardProps) {
   const totalsLine = createMemo(() => {
     const data = props.data()
     if (data === undefined) return ""
-    const totals = data.effectiveness.totals
-    const usage = data.status.usage
-    const guardrails = Object.values(usage.guardrails).reduce((sum, value) => sum + value, 0)
-    return `inj ${totals.injections} · fail ${totals.failures} · resolved ${totals.resolves} · preflight ${totals.preflights} (${totals.blocked} blocked) · P${usage.personality.entries} J${usage.project.entries} L${usage.lessons} G${guardrails}`
+    return totalsSummary(data.effectiveness.totals)
   })
 
   createEffect(() => {

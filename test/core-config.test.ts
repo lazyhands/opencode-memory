@@ -30,13 +30,14 @@ test("layered precedence: plugin options < global < project", () => {
 test("invalid values keep the previous layer and warn", () => {
   const dir = makeTmpDir()
   const globalPath = join(dir, "global.json")
-  writeFileSync(globalPath, JSON.stringify({ maxInjectChars: "huge", jit: "yes", protocol: "verbose" }))
+  writeFileSync(globalPath, JSON.stringify({ maxInjectChars: "huge", jit: "yes", protocol: "verbose", tui: { sidebar: "tiny" } }))
   const loaded = loadConfig({ options: { maxInjectChars: 3000, jit: false }, globalPath })
   assert.equal(loaded.config.maxInjectChars, 3000)
   assert.equal(loaded.config.jit, false)
   assert.equal(loaded.config.protocol, "full")
+  assert.equal(loaded.config.tui.sidebar, "compact")
   assert.equal(loaded.sources.maxInjectChars, "plugin options")
-  assert.equal(loaded.warnings.filter((w) => w.includes("invalid_config")).length, 3)
+  assert.equal(loaded.warnings.filter((w) => w.includes("invalid_config")).length, 4)
 })
 
 test("malformed JSON skips only that layer", () => {
@@ -61,7 +62,7 @@ test("non-object layers and unknown keys are ignored", () => {
 })
 
 test("every field is tracked and validated", () => {
-  assert.equal(CONFIG_FIELD_PATHS.length, 15)
+  assert.equal(CONFIG_FIELD_PATHS.length, 16)
   const sources = loadConfig({ options: { capture: { ignoreTools: ["write"] } } })
   assert.equal(sources.sources["capture.ignoreTools"], "plugin options")
   assert.deepEqual(sources.config.capture.ignoreTools, ["write"])

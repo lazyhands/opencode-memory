@@ -117,3 +117,88 @@ export function parseFieldText(type: string, text: string): { ok: true; value: u
       return { ok: true, value: text }
   }
 }
+
+// ---------------------------------------------------------------------------
+// Sidebar summary — plain language, progressive disclosure
+// ---------------------------------------------------------------------------
+
+export type SidebarMode = "compact" | "full" | "off"
+
+/** Sidebar verbosity from config values; unknown/missing falls back to compact. */
+export function sidebarMode(values: Record<string, unknown>): SidebarMode {
+  const value = values["tui.sidebar"]
+  return value === "full" || value === "off" ? value : "compact"
+}
+
+/** How many entries were surfaced just-in-time in one injection event. */
+export function recalledCount(event: InjectionLogEntry | undefined): number {
+  if (event === undefined) return 0
+  const relevant = event.sections.find((section) => section.name === "RELEVANT THIS TURN")
+  if (relevant === undefined) return 0
+  return Object.values(relevant.why ?? {}).filter((reason) => reason.startsWith("jit:")).length
+}
+
+/** Total guardrail records across states. */
+function guardrailTotal(usage: StatusData["usage"]): number {
+  return Object.values(usage.guardrails).reduce((sum, value) => sum + value, 0)
+}
+
+/** `2 project · 0 global · 2 lessons · 2 guardrails` — shared by full mode and the status toast. */
+export function scopeBreakdown(usage: StatusData["usage"]): string {
+  return `${usage.project.entries} project · ${usage.personality.entries} global · ${usage.lessons} lessons · ${guardrailTotal(usage)} guardrails`
+}
+
+/** Red attention line when a guardrail failed again after being fixed. */
+export function attentionLine(usage: StatusData["usage"]): string | undefined {
+  if (usage.reoccurring <= 0) return undefined
+  return `${usage.reoccurring} guardrail${usage.reoccurring === 1 ? "" : "s"} failing again`
+}
+
+/** Spelled-out totals for the dashboard header. */
+export function totalsSummary(totals: EffectivenessData["totals"]): string {
+  const count = (n: number, singular: string, plural = `${singular}s`): string => `${n} ${n === 1 ? singular : plural}`
+  return `${count(totals.injections, "injection")} · ${count(totals.failures, "failure")} · ${count(totals.resolves, "fix", "fixes")} · ${count(totals.preflights, "preflight check")} (${totals.blocked} blocked)`
+}
+
+export interface SidebarSummary {
+  /** Muted detail lines under the `memory` label (empty when hidden or stat-free). */
+  lines: string[]
+  /** Attention line, rendered in the error color with a leading dot. */
+  attention: string | undefined
+}
+
+/**
+ * The user-facing sidebar content. `compact` (default) answers "how much does
+ * it know and did it just help?" in one plain sentence; `full` adds the scope
+ * breakdown and injection size; `off` hides the widget.
+ */
+export function sidebarSummary(input: {
+  usage: StatusData["usage"]
+  lastInjection: InjectionLogEntry | undefined
+  mode: SidebarMode
+}): SidebarSummary {
+  if (input.mode === "off") return { lines: [], attention: undefined }
+  const attention = attentionLine(input.usage)
+
+  if (input.mode === "full") {
+    const breakdown = `${input.usage.project.entries} project · ${input.usage.personality.entries} global · ${input.usage.lessons} lessons`
+    return { lines: [breakdown, guardrailDetail(input.usage, input.lastInjection)], attention }
+  }
+
+  const total =
+    input.usage.project.entries + input.usage.personality.entries + input.usage.lessons + guardrailTotal(input.usage)
+  if (total === 0) return { lines: ["nothing remembered yet"], attention }
+  const recalled = recalledCount(input.lastInjection)
+  const remembered = `${total} memor${total === 1 ? "y" : "ies"}`
+  return { lines: [recalled > 0 ? `${remembered} · ${recalled} recalled just now` : remembered], attention }
+}
+
+function guardrailDetail(usage: StatusData["usage"], event: InjectionLogEntry | undefined): string {
+  const total = guardrailTotal(usage)
+  const label = `${total} guardrail${total === 1 ? "" : "s"}`
+  if (event === undefined) return label
+  const tokens = Math.max(1, Math.round(event.chars / 4))
+  const recalled = recalledCount(event)
+  const recalledPart = recalled > 0 ? `${recalled} recalled · ` : ""
+  return `${label} · ${recalledPart}added ${tokens} tok`
+}

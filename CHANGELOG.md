@@ -2,6 +2,15 @@
 
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.1] — 2026-10-16
+
+### Changed
+
+- **Sidebar redone for comprehension** — instead of cryptic counters (`P0 · J2 · L2 · G2`, `inj 436 tok · jit 2`) it now reads as plain language: `6 memories · 2 recalled just now`, with a red `● N guardrails failing again` attention line only when something needs attention, and `nothing remembered yet` as the empty state. The detailed counters remain available via the new `full` mode.
+- **New config field `tui.sidebar`** (`compact` | `full` | `off`) — choose sidebar verbosity; the guided config editor offers the three values with descriptions.
+- **Spelled-out totals** — the `/memory status` toast and the dashboard totals row no longer use `inj`/`fail`/`P-J-L-G` abbreviations (`9 injections · 2 failures · 1 fix · …`).
+- Enum pickers in the config editor now explain each value (`block — reject matching calls before they run`).
+
 ## [0.2.0] — 2026-10-16
 
 First release.

@@ -21,5 +21,8 @@
     "enabled": true,
     "retentionDays": 30
   },
-  "protocol": "full"
+  "protocol": "full",
+  "tui": {
+    "sidebar": "compact"
+  }
 }

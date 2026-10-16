@@ -53,7 +53,7 @@ The model gets nine tools. All are non-throwing: failures come back as typed res
 
 ## TUI
 
-- **Sidebar** — `memory`, scope counters (`P# · J# · L# · G#`), a red dot when unresolved guardrails have reoccurred, and the session injection line (`inj N tok · jit N`).
+- **Sidebar** — plain-language summary: how many memories exist (`6 memories`), whether any were recalled just now (`2 recalled just now`), and a red `● N guardrails failing again` line when a known failure reoccurred. Verbosity follows the `tui.sidebar` config field: `compact` (default — one line), `full` (scope breakdown + injection size), or `off` (hidden).
 - **`/memory`** — opens the dashboard panel:
   - `1` Injections — the session's injection timeline with per-section breakdowns and truncation reasons.
   - `2` Effectiveness — guardrail/lesson table: injected ×, reoccurred ×, state, mode, and the recorded fix.
@@ -92,6 +92,7 @@ Resolution order (first wins): project `<project>/.opencode/memory/config.json` 
 | `audit.enabled` | bool | true | Write the injection audit log. |
 | `audit.retentionDays` | int | 30 | Audit retention window. |
 | `protocol` | string | `"full"` | Protocol block verbosity injected into snapshots: `full`, `short`, or `off`. |
+| `tui.sidebar` | string | `"compact"` | Sidebar widget verbosity: `compact`, `full`, or `off`. |
 
 ## Files
 

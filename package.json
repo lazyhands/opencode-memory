@@ -1,6 +1,6 @@
 {
   "name": "@deepakjangra/opencode-memory",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Durable cross-session memory for OpenCode: personality and project scopes, learnings, auto-captured guardrails, issue threads, and an injection audit dashboard.",
   "keywords": [
     "opencode",

@@ -395,8 +395,9 @@ test("guardrailList and status expose reoccurring guardrails; configView carries
 
   assert.equal(fx.runtime.statusData(loaded).usage.reoccurring, 1)
   const view = fx.runtime.configView(loaded)
-  assert.equal(view.fields.length, 15)
+  assert.equal(view.fields.length, 16)
   assert.ok(view.fields.some((field) => field.path === "guardrails.mode" && field.type === "string"))
+  assert.ok(view.fields.some((field) => field.path === "tui.sidebar" && field.type === "string"))
 })
 
 test("memory writes seed a .gitignore that only hides the audit log, without clobbering", async () => {
