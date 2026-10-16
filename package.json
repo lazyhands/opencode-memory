@@ -37,7 +37,7 @@
   ],
   "scripts": {
     "check": "tsc --noEmit",
-    "test": "node --test test/"
+    "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@opencode/plugin": "2.0.29"
