@@ -17,7 +17,7 @@ import { createRuntime } from "./runtime.ts"
 import { memoryTools } from "./tools.ts"
 import { isMemoryError } from "./core/errors.ts"
 
-export const MEMORY_VERSION = "0.2.3"
+export const MEMORY_VERSION = "0.2.4"
 
 const DEBUG =
   process.env["OPENCODE_MEMORY_DEBUG"] === "1" || process.env["OPENCODE_MEMORY_DEBUG"] === "true"

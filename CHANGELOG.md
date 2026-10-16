@@ -2,6 +2,16 @@
 
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.4] — 2026-10-16
+
+### Added
+
+- **"Install for AI agents" guide** — a step-by-step README section so an agent can install and verify the plugin when the user points it at this repository.
+
+### Changed
+
+- **Neutral install identity** — the project moved to the `lazyhands` organization and the package is now `@lazyhands/opencode-memory`. Install with `opencode plugin add github:lazyhands/opencode-memory#v0.2.4`; package metadata, docs, and repository URLs all point at the new home.
+
 ## [0.2.3] — 2026-10-16
 
 ### Added
