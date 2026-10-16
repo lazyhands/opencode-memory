@@ -37,7 +37,7 @@ The first session in a project creates `.opencode/memory/` with the project stor
 
 ## Tools
 
-The model gets nine tools. All are non-throwing: failures come back as typed results, and memory content can never block a session.
+The model gets nine tools. Expected failures come back as typed `[code] message` errors rather than crashing the session; a memory problem never stops the run.
 
 | Tool | Purpose |
 | --- | --- |
@@ -96,7 +96,7 @@ Resolution order (first wins): project `<project>/.opencode/memory/config.json` 
 
 ## Files
 
-Project scope (`<project>/.opencode/memory/`): `project.md`, `learnings.md`, `issues.md`, `guardrails.jsonl`, `config.json`, and `audit.jsonl` (runtime log, auto-gitignored); forgotten entries are kept under `recovery/`. The personality scope lives in `~/.config/opencode/memory/` (`personality.md`, `config.json`). All writes are atomic (temp + rename), reads are cached by mtime — safe across concurrent sessions.
+Project scope (`<project>/.opencode/memory/`): `project.md`, `learnings.md`, `issues.md`, `guardrails.jsonl`, `config.json`, and `audit.jsonl` (runtime log, auto-gitignored); forgotten entries are kept under `recovery/`. The personality scope lives in `~/.config/opencode/memory/` (`personality.md`, `config.json`). All writes are atomic (temp + rename) and reads are cached by mtime; concurrent sessions editing the same entry resolve last-write-wins.
 
 ## Troubleshooting
 

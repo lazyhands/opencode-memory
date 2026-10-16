@@ -7,11 +7,14 @@ All notable changes to this project. Format follows [Keep a Changelog](https://k
 ### Added
 
 - **Tag-triggered releases** — pushing a `vX.Y.Z` tag runs checks and tests, verifies the version pins match the tag (`package.json`, `MEMORY_VERSION` in `src/index.ts`), and publishes a GitHub release using the matching changelog section as notes.
+- **Distillation after compaction** — `autoDistillOnCompact` is now wired: when enabled, the first injected block after a context compaction carries a short `[DISTILL]` request to record this session's durable lessons via `memory_learn`.
 
 ### Fixed
 
 - **`/memory config` no longer opens the memory panel behind the editor** — the panel (injection log, config rows, footer hints) popping up uninvited read as "a second broken sidebar". The guided dialog chain now runs on its own; the panel opens only when you ask for it (`/memory`).
 - **Editor dialogs can no longer have their keystrokes stolen by the panel keymap** — prompts refused `1`/`2`/`3` (bound to panel tabs) whenever the panel was open, so values like `2500` couldn't be typed. The keymap now stands down while a config dialog (picker, value prompt, scope select) is open.
+- **Guardrails no longer carry personal paths** — fingerprints and stored call text mask home (`/Users/<name>`, `/home/<name>`) and temp-directory prefixes, so a committed `guardrails.jsonl` is machine-independent and free of usernames.
+- **Invalid config scope is rejected** — the config RPC no longer silently defaults an unknown scope to project.
 
 ### Security
 
