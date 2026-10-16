@@ -19,7 +19,7 @@ OpenCode installs straight from git — no npm release needed:
 
 ```sh
 opencode plugin add github:DeepakJangra239/opencode-memory          # latest main
-opencode plugin add github:DeepakJangra239/opencode-memory#v0.2.0   # pinned tag (recommended)
+opencode plugin add github:DeepakJangra239/opencode-memory#v0.2.3   # pinned tag (recommended)
 opencode plugin list                                                # verify: RPC + TUI active
 ```
 
@@ -117,6 +117,16 @@ npm test        # unit tests (node --test)
 ```
 
 CI runs both on every push. The package ships TypeScript as-is (loaded natively by OpenCode and Node ≥ 24) with pinned `@opencode/plugin` internals for the server/TUI adapters; the `src/core/` domain layer is pure and platform-free.
+
+## Releasing
+
+The version lives in three places: `package.json`, `MEMORY_VERSION` in `src/index.ts`, and the newest `CHANGELOG.md` section. To cut a release:
+
+1. Update all three and commit.
+2. Tag the commit: `git tag vX.Y.Z`.
+3. Push the tag: `git push origin vX.Y.Z`.
+
+The tag triggers `.github/workflows/release.yml`: it runs the checks and tests, verifies the tag matches both version pins, and publishes a GitHub release whose notes are the matching `CHANGELOG.md` section. Users install a release with `opencode plugin add github:DeepakJangra239/opencode-memory#vX.Y.Z`.
 
 ## License
 
