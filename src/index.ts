@@ -7,7 +7,7 @@
  * OpenCode plugin surface:
  *
  *   - `session.hook("context")`  → turn-stable MEMORY block + JIT relevance
- *   - `session.hook("compaction")` → invalidate the cached block
+ *   - `session.hook("compaction")` → invalidate the cached block, request distillation
  *   - `tool.transform`            → the nine `memory_*` tools
  *   - `rpc.register`              → status / config / guardrail / search
  */
@@ -106,7 +106,8 @@ export default Plugin.define({
         try {
           const data = asObject(input)
           return await runtime.setConfigValue({
-            scope: data["scope"] === "global" ? "global" : "project",
+            // Unknown scopes pass through so setConfigValue can reject them.
+            scope: String(data["scope"] ?? "") as "global" | "project",
             key: typeof data["key"] === "string" ? data["key"] : String(data["key"] ?? ""),
             value: data["value"],
             sessionID: sessionIDOf(data),
@@ -230,6 +231,7 @@ export default Plugin.define({
       try {
         runtime.invalidateBlock(event.sessionID)
         runtime.invalidateApplied(event.sessionID)
+        await runtime.noteCompaction(event.sessionID)
       } catch (error) {
         debugLog(`compaction hook failed: ${String(error)}`)
       }
@@ -242,7 +244,7 @@ export default Plugin.define({
     // Pre-flight: match planned calls against recorded failure guardrails.
     // warn (default) pins the fix into the next model call without touching
     // this one; block (opt-in) aborts the call with the recorded fix —
-    // verified in Phase 0: rejecting `execute.before` fails that call alone.
+    // rejecting in `execute.before` fails that call alone, not the session.
     await ctx.tool.hook("execute.before", async (event) => {
       let result: Awaited<ReturnType<typeof runtime.preflight>>
       try {

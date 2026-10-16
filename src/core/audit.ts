@@ -1,5 +1,5 @@
 /**
- * Audit log + effectiveness scoring (req 2 + "improve over time").
+ * Audit log + effectiveness scoring: did an injected entry change anything?
  *
  * `audit.jsonl` is append-only: one event per line. Derived stats answer
  * "did injecting this entry change anything?" — reoccurrence after injection,

@@ -56,7 +56,15 @@ test("a real git worktree resolves to the main worktree root", () => {
   const base = makeTmpDir()
   const main = join(base, "main")
   mkdirSync(main, { recursive: true })
-  const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" }
+  // Scrubbed environment: local git only, no global/system config, no tokens.
+  const env = {
+    PATH: process.env["PATH"] ?? "",
+    HOME: base,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_SYSTEM: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_TERMINAL_PROMPT: "0",
+  }
   const git = (...args: string[]): void => {
     execFileSync("git", ["-C", main, "-c", "commit.gpgsign=false", ...args], { stdio: "pipe", env })
   }

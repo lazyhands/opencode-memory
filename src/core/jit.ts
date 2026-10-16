@@ -1,5 +1,5 @@
 /**
- * Just-in-time relevance (req 3 + 5).
+ * Just-in-time relevance.
  *
  * Deterministic matching of the current turn — user-message keywords plus
  * file paths and commands from recent tool calls — against issue threads

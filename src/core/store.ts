@@ -256,7 +256,7 @@ export function findUniqueIndex(entries: Entry[], needle: string): number {
 }
 
 // ---------------------------------------------------------------------------
-// Routing validation + lint (req 4: personality vs project)
+// Routing validation + lint (personality vs project)
 // ---------------------------------------------------------------------------
 
 export interface RoutingCheckInput {
