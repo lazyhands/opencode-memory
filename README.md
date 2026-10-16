@@ -18,9 +18,9 @@ Durable cross-session memory for [OpenCode](https://opencode.ai) v2. Two scopes 
 OpenCode installs straight from git — no npm release needed:
 
 ```sh
-opencode plugin add github:DeepakJangra239/opencode-memory          # latest main
-opencode plugin add github:DeepakJangra239/opencode-memory#v0.2.3   # pinned tag (recommended)
-opencode plugin list                                                # verify: RPC + TUI active
+opencode plugin add github:lazyhands/opencode-memory        # latest main
+opencode plugin add github:lazyhands/opencode-memory#v0.2.4 # pinned tag (recommended)
+opencode plugin list                                        # verify: RPC + TUI active
 ```
 
 Local development uses the checkout directly in `~/.config/opencode/opencode.json`:
@@ -34,6 +34,17 @@ Local development uses the checkout directly in `~/.config/opencode/opencode.jso
 ```
 
 The first session in a project creates `.opencode/memory/` with the project stores and a `.gitignore` that hides only the runtime audit log.
+
+## Install for AI agents
+
+Using an agent (opencode, Claude Code, …) to set this up? Point it at this repo — these are the instructions it needs:
+
+1. Install: `opencode plugin add github:lazyhands/opencode-memory#v0.2.4` (pin a tag; use `#main` only if the user wants unreleased code).
+2. Confirm the spec landed in the global config (`~/.config/opencode/opencode.json` → `"plugins"`).
+3. If an opencode background service is already running, restart it so the plugin loads: `opencode service restart`.
+4. Verify: the next session shows a `[MEMORY]` block; the `memory_status` tool (or `/memory` in the TUI) confirms it is live. No npm, no build step.
+
+What it gives the user: memory that survives sessions — global personality rules, per-project facts/decisions/corrections under `.opencode/memory/` in their repo, guardrails learned from failed tool calls, and an injection audit dashboard. Enforcement is `warn` by default; blocking is opt-in. The runtime logs (`audit.jsonl`, `guardrails.jsonl`) stay local unless the user commits them.
 
 ## Tools
 
@@ -126,7 +137,7 @@ The version lives in three places: `package.json`, `MEMORY_VERSION` in `src/inde
 2. Tag the commit: `git tag vX.Y.Z`.
 3. Push the tag: `git push origin vX.Y.Z`.
 
-The tag triggers `.github/workflows/release.yml`: it runs the checks and tests, verifies the tag matches both version pins, and publishes a GitHub release whose notes are the matching `CHANGELOG.md` section. Users install a release with `opencode plugin add github:DeepakJangra239/opencode-memory#vX.Y.Z`.
+The tag triggers `.github/workflows/release.yml`: it runs the checks and tests, verifies the tag matches both version pins, and publishes a GitHub release whose notes are the matching `CHANGELOG.md` section. Users install a release with `opencode plugin add github:lazyhands/opencode-memory#vX.Y.Z`.
 
 ## License
 
