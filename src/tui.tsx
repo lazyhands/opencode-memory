@@ -75,6 +75,9 @@ export default Plugin.define({
     const [dashError, setDashError] = createSignal<string | undefined>()
     const [panelSession, setPanelSession] = createSignal<string | undefined>()
     const [panelFocused, setPanelFocused] = createSignal(false)
+    // Dialogs steal raw keys (prompts accept digits!); the panel keymap binds
+    // 1/2/3, j/k, r, f — so it must stand down while any editor dialog is open.
+    const [dialogOpen, setDialogOpen] = createSignal(false)
     let panelClose: (() => void) | undefined
     let panelFullscreen: (() => void) | undefined
 
@@ -259,6 +262,7 @@ export default Plugin.define({
 
     // --- config editor ----------------------------------------------------
     const openConfigEditor = async (sessionID: string | undefined, presetPath?: string) => {
+      setDialogOpen(true)
       try {
         const view = await client.configGet(sessionID)
         let path = presetPath
@@ -347,13 +351,15 @@ export default Plugin.define({
         bump()
       } catch (error) {
         context.ui.toast.show({ message: `memory config: ${errorLine(error)}`, variant: "error" })
+      } finally {
+        setDialogOpen(false)
       }
     }
 
     // --- keymap -----------------------------------------------------------
     context.keymap.layer(() => ({
       mode: "global",
-      enabled: () => context.ui.panel.current()?.name === "memory" && panelFocused(),
+      enabled: () => context.ui.panel.current()?.name === "memory" && panelFocused() && !dialogOpen(),
       commands: [
         {
           id: "memory.tab.injections",
@@ -422,7 +428,6 @@ export default Plugin.define({
               .trim()
             if (arg === "config" || arg.startsWith("config ")) {
               const path = arg.startsWith("config ") ? arg.slice("config ".length).trim() : undefined
-              if (path === undefined) openMemory("config")
               await openConfigEditor(memorySession(), path === "" ? undefined : path)
               return
             }

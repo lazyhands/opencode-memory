@@ -2,6 +2,13 @@
 
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.3] — 2026-10-16
+
+### Fixed
+
+- **`/memory config` no longer opens the memory panel behind the editor** — the panel (injection log, config rows, footer hints) popping up uninvited read as "a second broken sidebar". The guided dialog chain now runs on its own; the panel opens only when you ask for it (`/memory`).
+- **Editor dialogs can no longer have their keystrokes stolen by the panel keymap** — prompts refused `1`/`2`/`3` (bound to panel tabs) whenever the panel was open, so values like `2500` couldn't be typed. The keymap now stands down while a config dialog (picker, value prompt, scope select) is open.
+
 ## [0.2.2] — 2026-10-16
 
 ### Fixed
