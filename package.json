@@ -1,6 +1,6 @@
 {
-  "name": "@deepakjangra/opencode-memory",
-  "version": "0.2.3",
+  "name": "@lazyhands/opencode-memory",
+  "version": "0.2.4",
   "description": "Durable cross-session memory for OpenCode: personality and project scopes, learnings, auto-captured guardrails, issue threads, and an injection audit dashboard.",
   "keywords": [
     "opencode",
@@ -18,11 +18,11 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/DeepakJangra239/opencode-memory.git"
+    "url": "git+https://github.com/lazyhands/opencode-memory.git"
   },
-  "homepage": "https://github.com/DeepakJangra239/opencode-memory#readme",
+  "homepage": "https://github.com/lazyhands/opencode-memory#readme",
   "bugs": {
-    "url": "https://github.com/DeepakJangra239/opencode-memory/issues"
+    "url": "https://github.com/lazyhands/opencode-memory/issues"
   },
   "exports": {
     ".": "./src/index.ts",
