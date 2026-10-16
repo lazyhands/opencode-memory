@@ -1,10 +1,12 @@
 /**
- * Failure fingerprinting (req 5: a zero-context model never repeats a failure).
+ * Failure fingerprinting (a zero-context model never repeats a failure).
  *
  * A guardrail is deduplicated on `sig` = tool + canonicalized input fingerprint
  * + normalized error class. Volatile fragments (ids, hashes, versions, dates,
  * numbers, absolute temp paths, quoted strings) are replaced with placeholders
  * so the same failure maps to the same signature across sessions and machines.
+ * Home and temp path prefixes are masked in stored fingerprints, fix lines,
+ * and generic input echoes, so committable guardrails stay free of personal paths.
  */
 import type { Guardrail } from "./learnings.ts"
 
@@ -25,6 +27,18 @@ export function collapseWhitespace(text: string): string {
 
 export function normalizeSlashes(path: string): string {
   return path.replace(/\\/g, "/")
+}
+
+/**
+ * Mask identity-bearing path prefixes — home directories (`/Users/<name>`,
+ * `/home/<name>`) and temp directories — while keeping the path tail, so
+ * stored fingerprints and fix lines stay machine-independent and free of
+ * personal paths.
+ */
+export function maskPaths(input: string): string {
+  return normalizeSlashes(input)
+    .replace(/\/(?:Users|home)\/[^/\s:"')\]]+/g, "<home>")
+    .replace(/(?:\/private\/var\/folders\/[^/\s:"')\]]+\/[^/\s:"')\]]+\/T|\/tmp)(?=[/\s:"')\]]|$)/g, "<tmp>")
 }
 
 /** Replace volatile fragments with stable placeholders (order matters). */
@@ -92,20 +106,22 @@ export function stableStringify(value: unknown, maxDepth = 4): string {
 export function normalizeCall(tool: string, input: unknown): NormalizedCall {
   if (typeof input === "string") {
     const text = collapseWhitespace(input)
-    return { fingerprint: truncate(normalizeVolatile(text), 120), display: truncate(text, 80) }
+    return { fingerprint: truncate(normalizeVolatile(text), 120), display: truncate(maskPaths(text), 80) }
   }
   const record = input && typeof input === "object" && !Array.isArray(input) ? (input as Record<string, unknown>) : {}
   const command = firstString(record, ["command", "cmd"])
   if (command) {
     const text = collapseWhitespace(command)
-    return { fingerprint: truncate(normalizeVolatile(text), 120), display: truncate(text, 80) }
+    return { fingerprint: truncate(normalizeVolatile(text), 120), display: truncate(maskPaths(text), 80) }
   }
   const path = firstString(record, PATH_KEYS)
   if (path) {
-    const text = normalizeSlashes(path)
-    return { fingerprint: truncate(text, 120), display: truncate(text, 80) }
+    // Mask the home/temp prefix but keep the tail, so two different files
+    // never collapse to the same fingerprint and no username is stored.
+    const text = maskPaths(path)
+    return { fingerprint: truncate(normalizeVolatile(text), 120), display: truncate(text, 80) }
   }
-  const stable = stableStringify(record)
+  const stable = maskPaths(stableStringify(record))
   return { fingerprint: truncate(stable, 120), display: truncate(`${tool} ${stable}`, 80) }
 }
 
@@ -177,8 +193,8 @@ export function matchGuardrail(record: Guardrail, call: CallLike): GuardrailMatc
 
 /**
  * Is a *successful* call a candidate fix for a guardrail? True when the tool
- * matches and the successful input differs from the failing one. Callers add
- * the "was surfaced in this session" condition (server, Phase 3).
+ * matches and the successful input differs from the failing one. The server
+ * adds the "was surfaced in this session" condition.
  */
 export function canResolveWith(record: Guardrail, call: CallLike): boolean {
   if (record.tool !== call.tool) return false

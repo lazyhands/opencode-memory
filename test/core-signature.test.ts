@@ -26,6 +26,28 @@ test("normalizeVolatile strips volatile fragments across sessions", () => {
   assert.ok(!a.includes("/Users/"))
 })
 
+test("normalizeCall masks home and temp path prefixes", () => {
+  const abs = normalizeCall("edit", { filePath: "/Users/someone/Dev/app/src/x.ts" })
+  assert.equal(abs.display, "<home>/Dev/app/src/x.ts")
+  assert.ok(!abs.fingerprint.includes("someone"))
+
+  // Plain-string input: the fingerprint fully collapses volatile absolute
+  // paths (normalizeVolatile), and the display keeps the masked tail.
+  const tmpString = normalizeCall("read", "/private/var/folders/ab/cdef12/T/opencode/x.txt")
+  assert.equal(tmpString.fingerprint, "<path>")
+  assert.equal(tmpString.display, "<tmp>/opencode/x.txt")
+
+  // Path-shaped inputs keep the meaningful tail in the fingerprint too.
+  const tmpPath = normalizeCall("read", { filePath: "/private/var/folders/ab/cdef12/T/opencode/x.txt" })
+  assert.equal(tmpPath.fingerprint, "<tmp>/opencode/x.txt")
+
+  const command = normalizeCall("bash", { command: "cd /Users/someone/app && npm test" })
+  assert.equal(command.display, "cd <home>/app && npm test")
+
+  const generic = normalizeCall("mystery", { seed: "/home/someone/secret.txt" })
+  assert.ok(!generic.display.includes("someone"))
+})
+
 test("signatureFor is stable for the same failure", () => {
   const first = signatureFor("bash", { command: "npm test" }, "sh: npm: command not found (session 12345)")
   const second = signatureFor("bash", { command: "npm test" }, "sh: npm: command not found (session 99999)")
