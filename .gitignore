@@ -2,3 +2,6 @@ node_modules/
 .spike/
 *.tgz
 .DS_Store
+
+# This repo's own agent memory — kept local, never published
+.opencode/
