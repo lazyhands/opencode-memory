@@ -8,7 +8,7 @@
 import { createEffect, createMemo, For, Show } from "solid-js"
 import type { Accessor } from "solid-js"
 import type { Plugin } from "@opencode/plugin/tui"
-import { displayValue, totalsSummary } from "./tui-rpc.ts"
+import { displayValue, sourceKind, totalsSummary } from "./tui-rpc.ts"
 import type { MemoryTuiClient } from "./tui-rpc.ts"
 
 export type MemoryTab = "injections" | "effectiveness" | "config"
@@ -88,10 +88,10 @@ function effectivenessRows(data: DashboardData): Row[] {
 function configRows(data: DashboardData): Row[] {
   const { fields, values, sources } = data.config
   return fields.map((field) => {
-    const source = sources[field.path]
+    const kind = sourceKind(sources[field.path])
     return {
       text: `${field.path} = ${displayValue(values[field.path])}`,
-      detail: `${field.description}${source !== undefined && source !== "" ? ` · source: ${source}` : ""}`,
+      detail: `${field.description}${kind !== undefined ? ` · source: ${kind}` : ""}`,
       select: { configPath: field.path },
     }
   })

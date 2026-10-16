@@ -76,22 +76,22 @@ export interface ConfigField {
 
 /** Flat catalog of every tunable leaf — drives validation, status and the TUI editor. */
 export const CONFIG_FIELDS: readonly ConfigField[] = [
-  { path: "personalityCharLimit", type: "int", description: "Total char cap for personality entries" },
-  { path: "projectCharLimit", type: "int", description: "Total char cap for project entries" },
-  { path: "perEntryCharLimit", type: "int", description: "Max chars for a single entry" },
-  { path: "maxEntryLines", type: "int", description: "Max lines for a single entry" },
-  { path: "maxInjectChars", type: "int", description: "Budget for the injected memory block" },
-  { path: "jit", type: "bool", description: "Surface turn-relevant items (JIT section)" },
-  { path: "learnings.maxIndexTitles", type: "int", description: "Lesson titles shown in the index" },
-  { path: "capture.toolErrors", type: "bool", description: "Auto-capture tool failures as guardrails" },
-  { path: "capture.ignoreTools", type: "string[]", description: "Tools excluded from failure capture" },
-  { path: "capture.maxRecords", type: "int", description: "Max guardrail records kept" },
-  { path: "guardrails.mode", type: "string", description: "Default pre-flight behavior: warn | block" },
-  { path: "autoDistillOnCompact", type: "bool", description: "Draft lessons at compaction (costs a model call)" },
-  { path: "audit.enabled", type: "bool", description: "Write audit.jsonl events" },
-  { path: "audit.retentionDays", type: "int", description: "Audit log retention window" },
-  { path: "protocol", type: "string", description: "Injected protocol text: full | short | off" },
-  { path: "tui.sidebar", type: "string", description: "Sidebar widget: compact | full | off" },
+  { path: "personalityCharLimit", type: "int", description: "Global char cap" },
+  { path: "projectCharLimit", type: "int", description: "Project char cap" },
+  { path: "perEntryCharLimit", type: "int", description: "Max chars per entry" },
+  { path: "maxEntryLines", type: "int", description: "Max lines per entry" },
+  { path: "maxInjectChars", type: "int", description: "Memory block budget" },
+  { path: "jit", type: "bool", description: "Just-in-time recall" },
+  { path: "learnings.maxIndexTitles", type: "int", description: "Index titles" },
+  { path: "capture.toolErrors", type: "bool", description: "Capture errors" },
+  { path: "capture.ignoreTools", type: "string[]", description: "Excluded tools" },
+  { path: "capture.maxRecords", type: "int", description: "Guardrail cap" },
+  { path: "guardrails.mode", type: "string", description: "Warn or block calls" },
+  { path: "autoDistillOnCompact", type: "bool", description: "Draft lessons" },
+  { path: "audit.enabled", type: "bool", description: "Write audit events" },
+  { path: "audit.retentionDays", type: "int", description: "Retention (days)" },
+  { path: "protocol", type: "string", description: "Protocol block text" },
+  { path: "tui.sidebar", type: "string", description: "Sidebar mode" },
 ]
 
 export const CONFIG_FIELD_PATHS: readonly ConfigFieldPath[] = CONFIG_FIELDS.map((f) => f.path)

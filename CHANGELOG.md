@@ -2,6 +2,17 @@
 
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [0.2.2] — 2026-10-16
+
+### Fixed
+
+- **Config picker dialog no longer renders config-file paths** — the long `footer` (e.g. `/private/var/folders/.../config.json`) wrapped over several lines and shoved the field list around. Rows now read `field · description · value · source` with a short source label (`default`, `plugin`, `global`, `project`), right-aligned.
+- **Sidebar lines shortened so they can't wrap in narrow sidebars** — `6 memories · 2 recalled` (was `… · 2 recalled just now`), and full mode drops zero scopes: `3 project · 2 lessons` / `4 guardrails · 2 recalled · 436 tok` (was a 43-char line that wrapped at real sidebar widths).
+
+### Changed
+
+- The scope dialog (global vs project) now preselects the layer the field's value currently comes from, and the dashboard Config tab shows sources as `source: project` instead of a truncated path.
+
 ## [0.2.1] — 2026-10-16
 
 ### Changed

@@ -53,7 +53,7 @@ The model gets nine tools. All are non-throwing: failures come back as typed res
 
 ## TUI
 
-- **Sidebar** — plain-language summary: how many memories exist (`6 memories`), whether any were recalled just now (`2 recalled just now`), and a red `● N guardrails failing again` line when a known failure reoccurred. Verbosity follows the `tui.sidebar` config field: `compact` (default — one line), `full` (scope breakdown + injection size), or `off` (hidden).
+- **Sidebar** — plain-language summary: how many memories exist (`6 memories`), whether any were recalled this turn (`6 memories · 2 recalled`), and a red `● N guardrails failing again` line when a known failure reoccurred. Verbosity follows the `tui.sidebar` config field: `compact` (default — one line), `full` (scope breakdown + injection size), or `off` (hidden).
 - **`/memory`** — opens the dashboard panel:
   - `1` Injections — the session's injection timeline with per-section breakdowns and truncation reasons.
   - `2` Effectiveness — guardrail/lesson table: injected ×, reoccurred ×, state, mode, and the recorded fix.

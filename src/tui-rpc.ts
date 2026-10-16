@@ -130,6 +130,22 @@ export function sidebarMode(values: Record<string, unknown>): SidebarMode {
   return value === "full" || value === "off" ? value : "compact"
 }
 
+export type SourceKind = "default" | "plugin" | "global" | "project" | "file"
+
+/**
+ * Short, user-facing label for a config source. Sources are either the two
+ * synthetic layers or an absolute path to one of our two config files, so a
+ * suffix check is enough — and it keeps long paths out of dialog rows.
+ */
+export function sourceKind(source: string | undefined): SourceKind | undefined {
+  if (source === undefined || source === "") return undefined
+  if (source === "default") return "default"
+  if (source === "plugin options") return "plugin"
+  if (source.endsWith("/.config/opencode/memory/config.json")) return "global"
+  if (source.endsWith("/.opencode/memory/config.json")) return "project"
+  return "file"
+}
+
 /** How many entries were surfaced just-in-time in one injection event. */
 export function recalledCount(event: InjectionLogEntry | undefined): number {
   if (event === undefined) return 0
@@ -181,8 +197,14 @@ export function sidebarSummary(input: {
   const attention = attentionLine(input.usage)
 
   if (input.mode === "full") {
-    const breakdown = `${input.usage.project.entries} project · ${input.usage.personality.entries} global · ${input.usage.lessons} lessons`
-    return { lines: [breakdown, guardrailDetail(input.usage, input.lastInjection)], attention }
+    const scopes: string[] = []
+    if (input.usage.project.entries > 0) scopes.push(`${input.usage.project.entries} project`)
+    if (input.usage.personality.entries > 0) scopes.push(`${input.usage.personality.entries} global`)
+    if (input.usage.lessons > 0) scopes.push(`${input.usage.lessons} lessons`)
+    return {
+      lines: [scopes.length > 0 ? scopes.join(" · ") : "nothing saved yet", guardrailDetail(input.usage, input.lastInjection)],
+      attention,
+    }
   }
 
   const total =
@@ -190,15 +212,16 @@ export function sidebarSummary(input: {
   if (total === 0) return { lines: ["nothing remembered yet"], attention }
   const recalled = recalledCount(input.lastInjection)
   const remembered = `${total} memor${total === 1 ? "y" : "ies"}`
-  return { lines: [recalled > 0 ? `${remembered} · ${recalled} recalled just now` : remembered], attention }
+  return { lines: [recalled > 0 ? `${remembered} · ${recalled} recalled` : remembered], attention }
 }
 
 function guardrailDetail(usage: StatusData["usage"], event: InjectionLogEntry | undefined): string {
   const total = guardrailTotal(usage)
-  const label = `${total} guardrail${total === 1 ? "" : "s"}`
-  if (event === undefined) return label
-  const tokens = Math.max(1, Math.round(event.chars / 4))
-  const recalled = recalledCount(event)
-  const recalledPart = recalled > 0 ? `${recalled} recalled · ` : ""
-  return `${label} · ${recalledPart}added ${tokens} tok`
+  const parts = [`${total} guardrail${total === 1 ? "" : "s"}`]
+  if (event !== undefined) {
+    const recalled = recalledCount(event)
+    if (recalled > 0) parts.push(`${recalled} recalled`)
+    parts.push(`${Math.max(1, Math.round(event.chars / 4))} tok`)
+  }
+  return parts.join(" · ")
 }

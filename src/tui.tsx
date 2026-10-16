@@ -24,6 +24,7 @@ import {
   sidebarSummary,
   scopeBreakdown,
   attentionLine,
+  sourceKind,
 } from "./tui-rpc.ts"
 import type { MemoryTuiClient } from "./tui-rpc.ts"
 import { MemoryDashboard } from "./tui-dashboard.tsx"
@@ -265,12 +266,16 @@ export default Plugin.define({
           path = await context.ui.dialog.select<string>({
             title: "Memory config",
             placeholder: "Filter by field name…",
-            options: view.fields.map((field) => ({
-              title: field.path,
-              value: field.path,
-              description: `${displayValue(view.values[field.path])} — ${field.description}`,
-              ...(view.sources[field.path] !== undefined ? { footer: view.sources[field.path] } : {}),
-            })),
+            options: view.fields.map((field) => {
+              const kind = sourceKind(view.sources[field.path])
+              const value = displayValue(view.values[field.path])
+              return {
+                title: field.path,
+                value: field.path,
+                description: field.description,
+                footer: kind !== undefined ? `${value} · ${kind}` : value,
+              }
+            }),
             search: (query, options) => {
               const needle = query.trim().toLowerCase()
               if (needle === "") return options
@@ -321,7 +326,7 @@ export default Plugin.define({
         const scope = await context.ui.dialog.select<"global" | "project">({
           title: `${path} = ${displayValue(value)}`,
           placeholder: "Write to…",
-          current: "project",
+          current: sourceKind(view.sources[path]) === "global" ? "global" : "project",
           options: [
             {
               title: "project",

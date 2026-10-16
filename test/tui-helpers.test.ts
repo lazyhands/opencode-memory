@@ -9,6 +9,7 @@ import {
   scopeBreakdown,
   sidebarMode,
   sidebarSummary,
+  sourceKind,
   totalsSummary,
 } from "../src/tui-rpc.ts"
 import type { InjectionLogEntry, StatusData } from "../src/runtime.ts"
@@ -122,7 +123,7 @@ test("compact sidebar: empty state, counts, recalls and singular grammar", () =>
     lastInjection: injection({ "t:g1": "jit:keyword", "t:g2": "always" }),
     mode: "compact",
   })
-  assert.deepEqual(filled.lines, ["6 memories · 1 recalled just now"])
+  assert.deepEqual(filled.lines, ["6 memories · 1 recalled"])
 
   const single = sidebarSummary({
     usage: usage({ project: { entries: 1, chars: 50, cap: 4000 } }),
@@ -156,18 +157,37 @@ test("full sidebar shows the scope breakdown and injection size on fitting lines
   })
   assert.deepEqual(summary.lines, [
     "2 project · 1 global · 2 lessons",
-    "2 guardrails · 2 recalled · added 436 tok",
+    "2 guardrails · 2 recalled · 436 tok",
   ])
 
   const noInjection = sidebarSummary({ usage: usage(), lastInjection: undefined, mode: "full" })
-  assert.deepEqual(noInjection.lines, ["0 project · 0 global · 0 lessons", "0 guardrails"])
+  assert.deepEqual(noInjection.lines, ["nothing saved yet", "0 guardrails"])
 
   const singular = sidebarSummary({
     usage: usage({ guardrails: { open: 1 } }),
     lastInjection: injection({}, 1338),
     mode: "full",
   })
-  assert.deepEqual(singular.lines, ["0 project · 0 global · 0 lessons", "1 guardrail · added 335 tok"])
+  assert.deepEqual(singular.lines, ["nothing saved yet", "1 guardrail · 335 tok"])
+})
+
+test("full sidebar drops zero scopes to keep lines narrow", () => {
+  const summary = sidebarSummary({
+    usage: usage({ project: { entries: 3, chars: 200, cap: 4000 }, lessons: 2, guardrails: { open: 4 } }),
+    lastInjection: undefined,
+    mode: "full",
+  })
+  assert.deepEqual(summary.lines, ["3 project · 2 lessons", "4 guardrails"])
+})
+
+test("sourceKind maps layers and our two config files to short labels", () => {
+  assert.equal(sourceKind(undefined), undefined)
+  assert.equal(sourceKind(""), undefined)
+  assert.equal(sourceKind("default"), "default")
+  assert.equal(sourceKind("plugin options"), "plugin")
+  assert.equal(sourceKind("/Users/x/.config/opencode/memory/config.json"), "global")
+  assert.equal(sourceKind("/Users/x/repo/.opencode/memory/config.json"), "project")
+  assert.equal(sourceKind("/somewhere/else.json"), "file")
 })
 
 test("off sidebar renders nothing", () => {
