@@ -4,10 +4,18 @@ All notable changes to this project. Format follows [Keep a Changelog](https://k
 
 ## [0.2.3] — 2026-10-16
 
+### Added
+
+- **Tag-triggered releases** — pushing a `vX.Y.Z` tag runs checks and tests, verifies the version pins match the tag (`package.json`, `MEMORY_VERSION` in `src/index.ts`), and publishes a GitHub release using the matching changelog section as notes.
+
 ### Fixed
 
 - **`/memory config` no longer opens the memory panel behind the editor** — the panel (injection log, config rows, footer hints) popping up uninvited read as "a second broken sidebar". The guided dialog chain now runs on its own; the panel opens only when you ask for it (`/memory`).
 - **Editor dialogs can no longer have their keystrokes stolen by the panel keymap** — prompts refused `1`/`2`/`3` (bound to panel tabs) whenever the panel was open, so values like `2500` couldn't be typed. The keymap now stands down while a config dialog (picker, value prompt, scope select) is open.
+
+### Security
+
+- **Clean dependency audit** — the peer-pinned `solid-js@1.9.12` resolves `seroval@1.5.x`, which has two critical advisories with no in-range fix; an npm `overrides` entry now forces the patched `seroval`/`seroval-plugins` 1.6.9. `npm audit` reports zero vulnerabilities.
 
 ## [0.2.2] — 2026-10-16
 
