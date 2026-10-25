@@ -238,7 +238,7 @@ test("a recorded failure auto-resolves when the fix succeeds in the same session
   assert.equal(resolves[0]?.["fix"], "bun test")
 })
 
-test("preflight surfacing enables the resolve loop; unrelated successes never resolve", async () => {
+test("preflight surfacing enables the resolve loop for an open guardrail", async () => {
   const fx = makeServerFixture()
   writeFileSync(
     guardrailsFile(fx),
@@ -248,8 +248,7 @@ test("preflight surfacing enables the resolve loop; unrelated successes never re
         sig: "shell::npm test::command not found",
         tool: "shell",
         fingerprint: "npm test",
-        state: "resolved",
-        fix: { input: "bun test", at: "2026-10-05T00:00:00.000Z" },
+        state: "open",
       }),
     ]),
   )
@@ -262,10 +261,43 @@ test("preflight surfacing enables the resolve loop; unrelated successes never re
   // A different tool never resolves it either.
   const otherTool = await fx.runtime.autoResolve({ sessionID: "ses_loop", tool: "read", input: { filePath: "package.json" } })
   assert.deepEqual(otherTool.resolved, [])
-  assert.equal(readGuardrails(guardrailsFile(fx))[0]?.state, "resolved")
+  assert.equal(readGuardrails(guardrailsFile(fx))[0]?.state, "open")
 
   const fixed = await fx.runtime.autoResolve({ sessionID: "ses_loop", tool: "shell", input: { command: "bun test" } })
   assert.deepEqual(fixed.resolved, ["g4"])
+})
+
+test("a resolved guardrail is never re-resolved by later successful calls", async () => {
+  const fx = makeServerFixture()
+  writeFileSync(
+    guardrailsFile(fx),
+    serializeGuardrails([
+      guardrail({
+        id: "g5",
+        sig: "shell::npm test::command not found",
+        tool: "shell",
+        fingerprint: "npm test",
+        state: "resolved",
+        fix: { input: "bun test", at: "2026-10-05T00:00:00.000Z" },
+      }),
+    ]),
+  )
+
+  // The resolved guardrail is injected (and thus re-surfaced) every rebuild.
+  const first = await fx.runtime.inject({ sessionID: "ses_rr", messages: MESSAGE })
+  assert.ok(first.block?.includes("[GUARDRAILS] 1 resolved · 0 open"))
+
+  const before = readFileSync(guardrailsFile(fx), "utf8")
+  const again = await fx.runtime.autoResolve({ sessionID: "ses_rr", tool: "shell", input: { command: "bun test" } })
+  assert.deepEqual(again.resolved, [])
+  assert.equal(readFileSync(guardrailsFile(fx), "utf8"), before, "guardrail file untouched")
+  assert.equal(auditEvents(fx).filter((event) => event.type === "resolve").length, 0)
+  assert.equal(fx.events.filter((event) => event.event === "changed").length, 0)
+
+  // The next model call reuses the cached block byte-for-byte.
+  const second = await fx.runtime.inject({ sessionID: "ses_rr", messages: MESSAGE })
+  assert.equal(second.rebuilt, false)
+  assert.equal(second.hash, first.hash)
 })
 
 test("auto-resolve does nothing without a surfaced guardrail in the session", async () => {

@@ -2,6 +2,12 @@
 
 All notable changes to this project. Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow [SemVer](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- **Resolved guardrails are no longer re-resolved after every successful call** — auto-resolve now targets only `open` guardrails. Re-resolving an already-resolved record rewrote its `fix` line after every matching tool call, which changed the injected memory block at the top of the prompt and invalidated the provider's prompt cache for the whole conversation.
+
 ## [0.2.4] — 2026-10-16
 
 ### Added

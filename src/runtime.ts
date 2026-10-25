@@ -407,7 +407,7 @@ export interface MemoryRuntime {
   captureFailure(input: { sessionID: string; tool: string; input: unknown; error: unknown }): Promise<CaptureResult>
   /** Pre-flight match (`execute.before`): warn pin or block message. */
   preflight(input: { sessionID: string; tool: string; input: unknown }): Promise<PreflightResult>
-  /** Auto-resolve surfaced guardrails fixed by a successful call. */
+  /** Auto-resolve surfaced open guardrails fixed by a successful call. */
   autoResolve(input: { sessionID: string; tool: string; input: unknown }): Promise<AutoResolveResult>
   /** Route one `execute.after` outcome (throw or completed call). */
   toolOutcome(input: ToolOutcomeInput): Promise<ToolOutcomeResult>
@@ -1010,11 +1010,14 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     if (!isGuardrailTool(input.tool, loaded.config.capture.ignoreTools)) return { resolved: [] }
 
     const call: CallLike = { tool: input.tool, input: input.input }
+    // Only open records: a resolved guardrail stays resolved. Re-resolving it
+    // on every matching success rewrites its fix line — and therefore the
+    // injected block — on every tool call, invalidating the prompt cache.
     const candidates = [...state.surfaced.keys()]
       .map((id) => loaded.guardrails.find((record) => record.id === id))
       .filter(
         (record): record is Guardrail =>
-          record !== undefined && record.state !== "dismissed" && fixCandidate(record, call),
+          record !== undefined && record.state === "open" && fixCandidate(record, call),
       )
     if (candidates.length === 0) return { resolved: [] }
 
