@@ -2,10 +2,14 @@
  * Server runtime: the adapter between OpenCode's plugin surface and the pure
  * `core/` modules (ARC-01 / PAT-05).
  *
- * Holds all per-instance state (epoch, per-session turn caches) and the
+ * Holds all per-instance state (epoch, per-session static/turn caches) and the
  * per-session resolution chain `sessionID → directory → canonical project
  * root`. Tools, hooks and RPC all call into this single runtime, so behaviour
  * never drifts between surfaces.
+ *
+ * Injection is split to protect the provider prompt cache: a session-static
+ * block appended to `system`, and a per-call tail appended after the messages
+ * (pins + JIT + distill). Guardrail churn touches only the tail.
  *
  * Deliberately free of runtime imports from `@opencode/*` so `node --test` can
  * exercise it directly with fake deps.
@@ -58,7 +62,7 @@ import {
 } from "./core/paths.ts"
 import { searchDocs } from "./core/search.ts"
 import type { SearchDoc } from "./core/search.ts"
-import { buildSnapshot, guardrailLine, SECTION_RENDER_ORDER } from "./core/snapshot.ts"
+import { buildStaticSnapshot, buildTurnSnapshot, guardrailLine, SECTION_RENDER_ORDER } from "./core/snapshot.ts"
 import type { SectionName, SnapshotPin, SnapshotSectionInfo } from "./core/snapshot.ts"
 import {
   canResolveWith,
@@ -214,10 +218,18 @@ const SECTION_REASON: Record<SectionName, string> = {
 }
 
 export interface InjectionResult {
-  /** The block to append to system parts (undefined when there is nothing to inject). */
+  /** Session-static block for `event.system` (undefined when empty). */
   block?: string | undefined
+  /** Per-call tail for the end of `event.messages` (undefined when empty). */
+  turn?: string | undefined
+  /** True when the static block was (re)built this call. */
   rebuilt: boolean
+  /** Combined static + turn hash (what the model received). */
   hash?: string | undefined
+  /** Static block hash, for cache diagnostics. */
+  staticHash?: string | undefined
+  /** Turn tail hash, for cache diagnostics. */
+  turnHash?: string | undefined
   chars?: number | undefined
 }
 
@@ -263,19 +275,23 @@ export interface ToolOutcomeResult {
 
 interface SessionState {
   turnKey?: string | undefined
-  block?: string | undefined
-  blockHash?: string | undefined
-  blockSections: SnapshotSectionInfo[]
-  blockTruncations: string[]
-  blockEpoch: number
-  blockConfigStamp?: string | undefined
-  /** Last block written into a system array — lets us replace carried-over parts. */
+  /** Session-static block and its build inputs. */
+  staticBlock?: string | undefined
+  staticHash?: string | undefined
+  staticSections: SnapshotSectionInfo[]
+  staticRefs: string[]
+  staticTruncations: string[]
+  staticStamp?: string | undefined
+  /** Last static block written into a system array — lets us replace carried-over parts. */
   appliedBlock?: string | undefined
+  /** Last audit row, so a reused block is not logged on every model call. */
+  lastLoggedHash?: string | undefined
+  lastLoggedTurnKey?: string | undefined
   pins: SnapshotPin[]
-  pinsVersion: number
-  blockPinsVersion: number
   /** A distillation pass was requested by the last compaction (opt-in). */
   pendingDistill: boolean
+  /** Turn whose tail carried the distillation request (consumed on turn change). */
+  distillTurnKey?: string | undefined
   /** Guardrail ids surfaced to the model this session (id → last surfaced at). */
   surfaced: Map<string, string>
   inFlight?: Promise<InjectionResult> | undefined
@@ -329,6 +345,10 @@ export interface InjectionLogEntry {
   refs: string[]
   sections: { name: string; chars: number; reason: string; refs: string[]; why?: Record<string, string> }[]
   truncations?: string[] | undefined
+  /** Static prefix hash (stable across a session unless static memory changed). */
+  staticHash?: string | undefined
+  /** Turn tail hash (changes when pins/JIT change). */
+  turnHash?: string | undefined
 }
 
 /** Effectiveness table + totals (for the TUI effectiveness tab). */
@@ -389,10 +409,16 @@ export interface MemoryRuntime {
   load(workspace: Workspace): LoadedWorkspace
   commit(loaded: LoadedWorkspace, scope: ChangedScope): void
   writeAudit(loaded: LoadedWorkspace, type: AuditEventType, fields: Record<string, unknown>): void
-  /** Build (or reuse) the turn-stable injection block. */
+  /** Build (or reuse) the session-static block and the per-call turn tail. */
   inject(input: { sessionID: string; messages: readonly unknown[] }): Promise<InjectionResult>
   /** Append/replace the block in a system-parts array; returns true when changed. */
   applyToSystem(sessionID: string, system: Array<{ type?: string; text?: string }>, block: string): boolean
+  /** Append/replace the turn tail at the end of the message list; returns true when changed. */
+  applyToMessages(
+    sessionID: string,
+    messages: Array<{ role?: string; content?: unknown; metadata?: Record<string, unknown> }>,
+    block: string,
+  ): boolean
   /** Remove any applied block from the session's tracking (compaction safety). */
   invalidateApplied(sessionID: string): void
   /** Pin an item into this session's next injected block (pre-flight / coaching). */
@@ -526,12 +552,10 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     let state = sessions.get(sessionID)
     if (!state) {
       state = {
-        blockSections: [],
-        blockTruncations: [],
-        blockEpoch: -1,
+        staticSections: [],
+        staticRefs: [],
+        staticTruncations: [],
         pins: [],
-        pinsVersion: 0,
-        blockPinsVersion: 0,
         pendingDistill: false,
         surfaced: new Map(),
       }
@@ -639,32 +663,76 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     }
   }
 
+  /**
+   * Hash of the sources the static block renders. Guardrails are deliberately
+   * excluded: their churn rides the turn tail, never a prefix rewrite.
+   */
+  function staticStampFor(loaded: LoadedWorkspace): string {
+    const config = loaded.config
+    return contentId(
+      "st",
+      stableStringify({
+        config: {
+          personalityCharLimit: config.personalityCharLimit,
+          projectCharLimit: config.projectCharLimit,
+          maxInjectChars: config.maxInjectChars,
+          maxIndexTitles: config.learnings.maxIndexTitles,
+          protocol: config.protocol,
+        },
+        personality: loaded.personality,
+        project: loaded.project,
+        lessons: loaded.lessons,
+        threads: loaded.threads,
+      }),
+    )
+  }
+
   async function doInject(input: { sessionID: string; messages: readonly unknown[] }): Promise<InjectionResult> {
     const state = sessionState(input.sessionID)
     const workspace = await resolveWorkspace(input.sessionID)
     const loaded = load(workspace)
     const turnKey = deriveTurnKey(input.messages)
-    const configStamp = stableStringify(loaded.config)
     const turnChanged = state.turnKey !== turnKey
-    const mustRebuild =
-      state.block === undefined ||
-      turnChanged ||
-      state.blockEpoch !== epoch ||
-      state.blockConfigStamp !== configStamp ||
-      state.blockPinsVersion !== state.pinsVersion
+    const staticStamp = staticStampFor(loaded)
 
-    if (!mustRebuild) {
-      return { ...(state.block ? { block: state.block } : {}), rebuilt: false, ...(state.blockHash ? { hash: state.blockHash } : {}), chars: state.block?.length }
-    }
-
-    if (state.turnKey !== undefined && turnChanged) {
-      // A genuinely new user turn drops last turn's pins. The very first
+    if (turnChanged && state.turnKey !== undefined) {
+      // A genuinely new user turn drops last turn's pins and consumes a
+      // distillation request that already rode a full turn. The very first
       // inject of a session keeps pins recorded before any block existed
       // (pre-flight can fire before the first model call).
       state.pins = []
-      state.pinsVersion++
+      if (state.pendingDistill && state.distillTurnKey !== undefined) {
+        state.pendingDistill = false
+        state.distillTurnKey = undefined
+      }
+    }
+    state.turnKey = turnKey
+
+    // The static prefix is built once, rebuilt after compaction, or rebuilt
+    // at a turn boundary when a static source changed. Mid-turn writes are
+    // deferred so the provider's cached prefix is never invalidated.
+    const mustBuildStatic =
+      state.staticBlock === undefined || (turnChanged && state.staticStamp !== staticStamp)
+    let staticRebuilt = false
+    if (mustBuildStatic) {
+      const snapshot = buildStaticSnapshot({
+        config: loaded.config,
+        personality: loaded.personality,
+        project: loaded.project,
+        lessons: loaded.lessons,
+        threads: loaded.threads,
+        guardrails: loaded.guardrails,
+      })
+      state.staticBlock = snapshot.block
+      state.staticHash = snapshot.hash
+      state.staticSections = snapshot.sections
+      state.staticRefs = snapshot.refs
+      state.staticTruncations = snapshot.truncations
+      state.staticStamp = staticStamp
+      staticRebuilt = true
     }
 
+    // JIT is per call: paths and commands arrive as the turn's tool calls land.
     const turn = turnContextFromMessages(input.messages)
     const corrections = loaded.project.filter((entry) => entry.kind === "correction")
     const jit: JitMatch[] = loaded.config.jit
@@ -676,7 +744,13 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
           guardrails: loaded.guardrails,
         })
       : []
-    const snapshot = buildSnapshot({
+
+    // The distillation request rides every call of the turn that saw the
+    // compaction, then is consumed at the next turn boundary.
+    const distill = state.pendingDistill
+    if (distill) state.distillTurnKey = turnKey
+
+    const turnSnapshot = buildTurnSnapshot({
       config: loaded.config,
       personality: loaded.personality,
       project: loaded.project,
@@ -685,34 +759,34 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       guardrails: loaded.guardrails,
       jit,
       pins: state.pins,
-      ...(state.pendingDistill ? { distill: true } : {}),
+      ...(distill ? { distill: true } : {}),
+      coveredRefs: new Set(state.staticRefs),
     })
-    // The distillation request rides exactly one built block; later turns
-    // go back to normal until the next compaction asks again.
-    state.pendingDistill = false
 
-    state.turnKey = turnKey
-    state.block = snapshot.block
-    state.blockHash = snapshot.hash
-    state.blockSections = snapshot.sections
-    state.blockTruncations = snapshot.truncations
-    state.blockEpoch = epoch
-    state.blockConfigStamp = configStamp
-    state.blockPinsVersion = state.pinsVersion
+    const staticBlock = state.staticBlock ?? ""
+    const turnBlock = turnSnapshot.block
+    const combined = [staticBlock, turnBlock].filter((part) => part !== "").join("\n\n")
+    const combinedHash = combined !== "" ? contentId("s", combined) : undefined
+    const chars = combined.length
 
     // Remember which guardrails the model has now seen; a later successful
     // call on the same tool can auto-resolve them (enforcement ladder #5).
-    // Section refs cover always-injected records, JIT matches and pins alike.
+    // Both blocks are in the request, so both sets of refs count as surfaced.
     markSurfaced(
       state,
-      snapshot.sections.flatMap((section) => section.refs),
+      [...state.staticSections, ...turnSnapshot.sections].flatMap((section) => section.refs),
     )
 
-    if (snapshot.block !== "") {
+    // One row per turn, plus an extra row only when the combined text changed
+    // (a capture/resolve pin, fresh JIT, or a static rebuild).
+    const shouldLog =
+      combinedHash !== undefined &&
+      (staticRebuilt || state.lastLoggedTurnKey !== turnKey || state.lastLoggedHash !== combinedHash)
+    if (shouldLog && combinedHash !== undefined) {
       const why: Record<string, string> = {}
       for (const match of jit) why[match.type === "thread" ? `t:${match.id}` : match.id] = match.reason
       for (const pin of state.pins) why[pin.ref] = pin.reason
-      const sections: InjectionAuditSection[] = snapshot.sections
+      const sections: InjectionAuditSection[] = [...state.staticSections, ...turnSnapshot.sections]
         .slice()
         .sort((a, b) => SECTION_RENDER_ORDER.indexOf(a.name) - SECTION_RENDER_ORDER.indexOf(b.name))
         .map((section) => {
@@ -729,30 +803,42 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
             ...(Object.keys(sectionWhy).length > 0 ? { why: sectionWhy } : {}),
           }
         })
+      const truncations = [...state.staticTruncations, ...turnSnapshot.truncations]
       writeAudit(loaded, "inject", {
         turnKey,
-        hash: snapshot.hash,
-        chars: snapshot.chars,
+        hash: combinedHash,
+        staticHash: state.staticHash ?? "",
+        turnHash: turnSnapshot.hash,
+        chars,
         // Flat refs list: the effectiveness stats ("injected N / reoccurred M")
         // key on this, independent of section layout.
         refs: [...new Set(sections.flatMap((section) => section.refs))],
         sections,
-        ...(snapshot.truncations.length > 0 ? { truncations: snapshot.truncations } : {}),
+        ...(truncations.length > 0 ? { truncations } : {}),
       })
+      state.lastLoggedHash = combinedHash
+      state.lastLoggedTurnKey = turnKey
       emit("injected", {
         sessionID: input.sessionID,
         turnKey,
-        hash: snapshot.hash,
-        chars: snapshot.chars,
-        sections: snapshot.sections.length,
+        hash: combinedHash,
+        chars,
+        sections: sections.length,
       })
     }
 
+    deps.debug?.(
+      `inject ${input.sessionID} static=${state.staticHash ?? "-"} turn=${turnSnapshot.hash} rebuilt=${staticRebuilt}`,
+    )
+
     return {
-      ...(snapshot.block ? { block: snapshot.block } : {}),
-      rebuilt: true,
-      hash: snapshot.hash,
-      chars: snapshot.chars,
+      ...(staticBlock !== "" ? { block: staticBlock } : {}),
+      ...(turnBlock !== "" ? { turn: turnBlock } : {}),
+      rebuilt: staticRebuilt,
+      ...(combinedHash !== undefined ? { hash: combinedHash } : {}),
+      ...(state.staticHash !== undefined ? { staticHash: state.staticHash } : {}),
+      turnHash: turnSnapshot.hash,
+      chars,
     }
   }
 
@@ -766,6 +852,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     return promise
   }
 
+  /** Append/replace the session-static block in a system-parts array. */
   function applyToSystem(sessionID: string, system: Array<{ type?: string; text?: string }>, block: string): boolean {
     const state = sessionState(sessionID)
     const previous = state.appliedBlock
@@ -786,6 +873,34 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     return true
   }
 
+  /**
+   * Append/replace the per-call turn tail at the end of the message list.
+   * The tail is request-local; the metadata marker also makes a reused
+   * array idempotent and keeps an old tail from being duplicated.
+   */
+  function applyToMessages(
+    sessionID: string,
+    messages: Array<{ role?: string; content?: unknown; metadata?: Record<string, unknown> }>,
+    block: string,
+  ): boolean {
+    if (block === "") return false
+    let found = -1
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const message = messages[i]
+      if (message?.role !== "system") continue
+      if (message.metadata?.["memory"] !== "turn") continue
+      found = i
+      break
+    }
+    if (found >= 0) {
+      const message = messages[found]
+      if (message && messageText(message) === block && found === messages.length - 1) return false
+      messages.splice(found, 1)
+    }
+    messages.push({ role: "system", content: [{ type: "text", text: block }], metadata: { memory: "turn" } })
+    return true
+  }
+
   function invalidateApplied(sessionID: string): void {
     const state = sessionState(sessionID)
     state.appliedBlock = undefined
@@ -794,14 +909,12 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
   function pin(sessionID: string, value: SnapshotPin): void {
     const state = sessionState(sessionID)
     state.pins = [...state.pins.filter((existing) => existing.ref !== value.ref), value]
-    state.pinsVersion++
   }
 
   function clearPins(sessionID: string): void {
     const state = sessionState(sessionID)
     if (state.pins.length === 0) return
     state.pins = []
-    state.pinsVersion++
   }
 
   /** Remember guardrail refs shown to the model (bounded, insertion-ordered). */
@@ -823,12 +936,17 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
 
   function invalidateBlock(sessionID: string): void {
     const state = sessionState(sessionID)
-    state.block = undefined
-    state.blockHash = undefined
-    state.blockEpoch = -1
+    state.staticBlock = undefined
+    state.staticHash = undefined
+    state.staticSections = []
+    state.staticRefs = []
+    state.staticTruncations = []
+    state.staticStamp = undefined
+    state.lastLoggedHash = undefined
+    state.lastLoggedTurnKey = undefined
   }
 
-  /** After a compaction, ask the next built block to prompt a distillation pass (opt-in). */
+  /** After a compaction, ask the next turn tail to prompt a distillation pass (opt-in). */
   async function noteCompaction(sessionID: string): Promise<void> {
     const loaded = load(await resolveWorkspace(sessionID))
     if (loaded.config.autoDistillOnCompact) sessionState(sessionID).pendingDistill = true
@@ -952,6 +1070,15 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       writeAudit(loaded, "reoccur", { ref: `g:${result.record.id}`, tool: input.tool })
     }
 
+    // Surface the new/changed guardrail in this turn's tail. The static
+    // block is never rebuilt for a guardrail write.
+    pin(input.sessionID, {
+      ref: `g:${result.record.id}`,
+      text: guardrailLine(result.record),
+      reason: `capture:${result.record.id}`,
+    })
+    markSurfaced(state, [`g:${result.record.id}`])
+
     if (coachedRecord) {
       pin(input.sessionID, {
         ref: `g:${coachedRecord.id}`,
@@ -1024,11 +1151,18 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     const fixInput = normalizeCall(input.tool, input.input).display
     let records = loaded.guardrails
     const resolved: string[] = []
+    const resolvedPins: SnapshotPin[] = []
     for (const record of candidates) {
       try {
-        records = resolveGuardrail(records, record.id, { input: fixInput }, now().toISOString()).records
+        const result = resolveGuardrail(records, record.id, { input: fixInput }, now().toISOString())
+        records = result.records
         state.surfaced.delete(record.id)
         resolved.push(record.id)
+        resolvedPins.push({
+          ref: `g:${result.record.id}`,
+          text: guardrailLine(result.record),
+          reason: `resolved:${result.record.id}`,
+        })
       } catch (error) {
         deps.debug?.(`auto-resolve skipped ${record.id}: ${String(error)}`)
       }
@@ -1037,6 +1171,9 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     atomicWrite(loaded.files.guardrails, serializeGuardrails(capGuardrails(records, loaded.config.capture.maxRecords)))
     commit(loaded, "guardrails")
     for (const id of resolved) writeAudit(loaded, "resolve", { ref: `g:${id}`, tool: input.tool, fix: fixInput })
+    // The static block is not rebuilt: the resolved line replaces the
+    // capture/preflight pin in this turn's tail.
+    for (const value of resolvedPins) pin(input.sessionID, value)
     return { resolved }
   }
 
@@ -1139,6 +1276,8 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
       const truncations = Array.isArray(event["truncations"])
         ? event["truncations"].filter((item): item is string => typeof item === "string")
         : undefined
+      const staticHash = event["staticHash"]
+      const turnHash = event["turnHash"]
       entries.push({
         ts: event.ts,
         ...(typeof session === "string" ? { sessionID: session } : {}),
@@ -1148,6 +1287,8 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
         refs,
         sections,
         ...(truncations !== undefined && truncations.length > 0 ? { truncations } : {}),
+        ...(typeof staticHash === "string" ? { staticHash } : {}),
+        ...(typeof turnHash === "string" ? { turnHash } : {}),
       })
     }
     return entries.slice(-limit).reverse()
@@ -1286,6 +1427,7 @@ export function createRuntime(deps: RuntimeDeps): MemoryRuntime {
     writeAudit,
     inject,
     applyToSystem,
+    applyToMessages,
     invalidateApplied,
     pin,
     clearPins,

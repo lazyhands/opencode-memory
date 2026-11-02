@@ -6,7 +6,13 @@ All notable changes to this project. Format follows [Keep a Changelog](https://k
 
 ### Fixed
 
+- **Guardrail writes no longer invalidate the provider prompt cache** — the memory payload is split into a session-static block (appended to the system instructions) and a small per-call turn tail (pins, just-in-time recall, distill). Failed tool calls, auto-resolves, and preflight pins now change only the tail; the tools + system + conversation prefix stays byte-identical for the session. Previously every guardrail write bumped the runtime epoch and rebuilt the whole injected block, which rewrote the top of the prompt and forced a cache miss.
 - **Resolved guardrails are no longer re-resolved after every successful call** — auto-resolve now targets only `open` guardrails. Re-resolving an already-resolved record rewrote its `fix` line after every matching tool call, which changed the injected memory block at the top of the prompt and invalidated the provider's prompt cache for the whole conversation.
+
+### Changed
+
+- **Two independent injection budgets** — `maxInjectChars` (default 2400) now sizes the session-static block; the per-call turn tail has a fixed 800-char cap. Durable memory edits (`memory_set`, `memory_learn`, `memory_issue`, config) are deferred to the next user turn so a mid-turn write never rewrites the cached prefix.
+- **Audit entries carry `staticHash` and `turnHash`** so cache behaviour is visible from the injection log; the combined `hash`, section breakdown, refs, and truncations are unchanged.
 
 ## [0.2.4] — 2026-10-16
 

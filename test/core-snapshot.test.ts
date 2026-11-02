@@ -9,8 +9,11 @@ import {
   PROTOCOL_FULL,
   PROTOCOL_SHORT,
   SECTION_RENDER_ORDER,
+  TURN_TAIL_CHARS,
   type SnapshotInputs,
   buildSnapshot,
+  buildStaticSnapshot,
+  buildTurnSnapshot,
 } from "../src/core/snapshot.ts"
 import { entry, guardrail, issue, lesson } from "./helpers.ts"
 
@@ -154,6 +157,110 @@ test("pins render first in RELEVANT THIS TURN", () => {
   assert.ok(snapshot.block.includes("[RELEVANT THIS TURN]"))
   assert.ok(snapshot.block.includes("- (pin preflight:g1) `npm test` → use `bun test`"))
   assert.ok(snapshot.refs.includes("g:g1"))
+})
+
+test("static snapshot keeps the durable sections and drops turn-only ones", () => {
+  const snapshot = buildStaticSnapshot(
+    inputs({
+      personality: [entry("rule", "Always research")],
+      project: [entry("fact", "The API uses SQLite")],
+      guardrails: [guardrail()],
+      lessons: [lesson("failure", "npm test fails", "Use bun test")],
+      pins: [{ ref: "g:g1", text: "pin text", reason: "preflight:g1" }],
+      jit: jitMatches({
+        ctx: { text: "auth" },
+        threads: [],
+        corrections: [],
+        lessons: [],
+        guardrails: [],
+      }),
+      distill: true,
+    }),
+  )
+  assert.ok(snapshot.block.includes("[GUARDRAILS]"))
+  assert.ok(snapshot.block.includes("[PERSONALITY]"))
+  assert.ok(snapshot.block.includes("[PROJECT]"))
+  assert.ok(snapshot.block.includes("[MEMORY PROTOCOL]"))
+  assert.ok(!snapshot.block.includes("[RELEVANT THIS TURN]"))
+  assert.ok(!snapshot.block.includes("[DISTILL]"))
+  assert.ok(!snapshot.block.includes("pin text"))
+})
+
+test("turn snapshot renders pins, JIT and distill within its own budget", () => {
+  const open = issue({ id: "i1", areas: ["src/auth/**"], status: "open" })
+  const fixed = issue({
+    id: "i2",
+    areas: ["src/auth/**"],
+    status: "fixed",
+    title: "Session leak",
+    notes: [{ at: "2026-10-03", status: "fixed", text: "do not reintroduce Z" }],
+  })
+  const jit = jitMatches({
+    ctx: { text: "fix the auth redirect", files: ["src/auth/session.ts"] },
+    threads: [open, fixed],
+    corrections: [],
+    lessons: [],
+    guardrails: [],
+  })
+  const snapshot = buildTurnSnapshot(
+    inputs({
+      threads: [open, fixed],
+      jit,
+      pins: [{ ref: "g:g1", text: "`npm test` → use `bun test`", reason: "preflight:g1" }],
+      distill: true,
+    }),
+  )
+  assert.ok(snapshot.block.includes("[RELEVANT THIS TURN]"))
+  assert.ok(snapshot.block.includes("- (pin preflight:g1)"))
+  assert.ok(snapshot.block.includes("(thread #i2 fixed · regression watch"))
+  assert.ok(snapshot.block.includes("[DISTILL]"))
+  assert.ok(!snapshot.block.includes("[GUARDRAILS]"))
+  assert.ok(!snapshot.block.includes("[MEMORY PROTOCOL]"))
+  assert.ok(snapshot.chars <= TURN_TAIL_CHARS)
+
+  // Refs already carried by the static block are not repeated in the tail.
+  const deduped = buildTurnSnapshot(inputs({ threads: [open, fixed], jit }), {
+    budget: TURN_TAIL_CHARS,
+  })
+  assert.ok(deduped.block.includes("(thread #i2"))
+  const covered = buildTurnSnapshot(
+    inputs({ threads: [open, fixed], jit, coveredRefs: new Set(["t:i2"]) }),
+  )
+  assert.ok(!covered.block.includes("(thread #i2"))
+})
+
+test("turn snapshot truncates oversized JIT with a recall marker", () => {
+  const threads = Array.from({ length: 20 }, (_, i) =>
+    issue({
+      id: `i${i + 1}`,
+      areas: ["src/auth/**"],
+      status: "fixed",
+      title: `Long fixed thread ${i + 1} ${"x".repeat(80)}`,
+    }),
+  )
+  const jit = jitMatches({
+    ctx: { text: "auth", files: ["src/auth/session.ts"] },
+    threads,
+    corrections: [],
+    lessons: [],
+    guardrails: [],
+  })
+  const snapshot = buildTurnSnapshot(inputs({ threads, jit }))
+  assert.ok(snapshot.chars <= TURN_TAIL_CHARS)
+  assert.ok(snapshot.truncations.some((t) => t.startsWith("RELEVANT THIS TURN:")))
+  assert.match(snapshot.block, /… \d+ more — recall via memory_search/)
+})
+
+test("static and turn snapshots are deterministic", () => {
+  const data = inputs({ personality: [entry("rule", "Always research")], project: [entry("fact", "The API uses SQLite")] })
+  const staticA = buildStaticSnapshot(data)
+  const staticB = buildStaticSnapshot(data)
+  assert.equal(staticA.block, staticB.block)
+  assert.equal(staticA.hash, staticB.hash)
+  const turnA = buildTurnSnapshot(data)
+  const turnB = buildTurnSnapshot(data)
+  assert.equal(turnA.block, turnB.block)
+  assert.equal(turnA.hash, turnB.hash)
 })
 
 test("empty stores still render personality/project hints", () => {

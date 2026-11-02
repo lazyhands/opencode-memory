@@ -6,7 +6,7 @@
  * contract (`rpc.ts`) is shared with the TUI. This file connects them to the
  * OpenCode plugin surface:
  *
- *   - `session.hook("context")`  → turn-stable MEMORY block + JIT relevance
+ *   - `session.hook("context")`  → static MEMORY block in `system` + turn tail in `messages`
  *   - `session.hook("compaction")` → invalidate the cached block, request distillation
  *   - `tool.transform`            → the nine `memory_*` tools
  *   - `rpc.register`              → status / config / guardrail / search
@@ -209,17 +209,30 @@ export default Plugin.define({
     // Hooks
     // -----------------------------------------------------------------------
 
-    // Turn-stable injection: one byte-stable MEMORY block per user turn,
-    // with just-in-time relevance for the current turn's text/paths/commands.
+    // Cache-first injection: the session-static MEMORY block goes into
+    // `system` once per session (rebuilt only on compaction or when a static
+    // source changed at a turn boundary). Everything that changes during a
+    // turn — preflight/coach pins, just-in-time relevance, distill — goes
+    // into a small tail at the end of the message list, so guardrail writes
+    // never invalidate the provider's cached prompt prefix.
     await ctx.session.hook("context", async (event) => {
       try {
         const result = await runtime.inject({
           sessionID: event.sessionID,
           messages: event.messages as unknown as readonly unknown[],
         })
-        if (!result.block) return
-        const system = event.system as unknown as Array<{ type?: string; text?: string }>
-        runtime.applyToSystem(event.sessionID, system, result.block)
+        if (result.block) {
+          const system = event.system as unknown as Array<{ type?: string; text?: string }>
+          runtime.applyToSystem(event.sessionID, system, result.block)
+        }
+        if (result.turn) {
+          const messages = event.messages as unknown as Array<{
+            role?: string
+            content?: unknown
+            metadata?: Record<string, unknown>
+          }>
+          runtime.applyToMessages(event.sessionID, messages, result.turn)
+        }
       } catch (error) {
         debugLog(`context hook failed: ${String(error)}`)
       }

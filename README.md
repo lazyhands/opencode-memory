@@ -6,12 +6,18 @@ Durable cross-session memory for [OpenCode](https://opencode.ai) v2. Two scopes 
 
 - **Personality scope** — operating rules and machine/stack facts that should always be on, in every project. Lives in `~/.config/opencode/memory/`.
 - **Project scope** — this project's durable facts, preferences, decisions, corrections, learnings, and issue threads. Stored in-repo at `.opencode/memory/` so it can be committed and shared with your team (or gitignored to keep private).
-- **Deterministic injection** — a budget-capped snapshot is built once per turn and injected before every model call: guardrails, corrections, open threads, both scopes, just-in-time material, lessons, and the protocol block. Every section and every truncation is logged (no LLM calls in the hot path).
-- **Just-in-time recall** — entries whose files or keywords appear in the conversation surface under `RELEVANT THIS TURN` even when the always-on budget is full.
+- **Cache-first deterministic injection** — a budget-capped, session-static block is appended to the system instructions once per session (guardrails, corrections, open threads, both scopes, lessons, protocol). Everything that changes during a turn — just-in-time recall, preflight/coach pins, distillation requests — is appended as a small tail at the end of the message list before every model call. Every section and every truncation is logged (no LLM calls in the hot path).
+- **Just-in-time recall** — entries whose files or keywords appear in the conversation surface under `RELEVANT THIS TURN` in the turn tail, even when the always-on budget is full.
 - **Auto-captured failures** — a failed tool call (thrown error or nonzero exit) is recorded without the model doing anything. Repeats coalesce into a guardrail with an error sample and, once fixed, a verified fix.
-- **Enforcement ladder** — `warn` pins a preflight reminder into the next snapshot; `block` rejects a known-failing call before it runs. Genuine success auto-resolves the guardrail; reoccurrence after a fix flips it back to `open` and shows a coach pin.
+- **Enforcement ladder** — `warn` pins a preflight reminder into the next model call's turn tail; `block` rejects a known-failing call before it runs. Genuine success auto-resolves the guardrail; reoccurrence after a fix flips it back to `open` and shows a coach pin.
 - **Issue threads** — multi-turn work opens a thread with affected areas; fixes are verified, regressions flip the thread to `regressed`.
 - **Audit** — see exactly what was injected, when, and why (`/memory` panel); the model can self-evaluate with the `memory_audit` tool.
+
+### Prompt cache
+
+The static block is byte-stable for the whole session, so the provider's cached prefix (tools + system + conversation) survives across model calls. Guardrail churn from failed or fixed tool calls only updates the turn tail — usually a single line — instead of rewriting the prefix. The static block rebuilds only on the first call, after a compaction, or at a new turn boundary when durable memory actually changed. Edits made mid-turn (`memory_set`, `memory_learn`, `memory_issue`, config) appear in the static block on the next user turn; until then, the tool result is the immediate confirmation.
+
+The audit log carries both hashes (`staticHash`, `turnHash`) so cache behaviour is provable: `staticHash` should stay constant unless durable memory changed, while `turnHash` changes when the tail does.
 
 ## Install
 
@@ -77,7 +83,7 @@ The model gets nine tools. Expected failures come back as typed `[code] message`
 
 1. **Capture** — every failing tool call is fingerprinted (tool + normalized arguments) and recorded; repeats increment a counter and keep the newest error sample.
 2. **Distill** — when the same failure reoccurs with a fix applied, the guardrail becomes `resolved` with `errorSample` and `fix`.
-3. **Preflight** — before each tool call, open guardrails matching tool + arguments are ranked (exact match, resolved fix, frequency). `warn` pins a reminder into the next injection; `block` rejects the call outright (the session continues; only that call fails).
+3. **Preflight** — before each tool call, open guardrails matching tool + arguments are ranked (exact match, resolved fix, frequency). `warn` pins a reminder into the next model call's turn tail; `block` rejects the call outright (the session continues; only that call fails).
 4. **Auto-resolve** — a genuine success on a matching call resolves the guardrail.
 
 Modes are per guardrail (`warn` / `block` / `inherit`) with the global default in `guardrails.mode`. Start with `warn` — it changes nothing about execution. Toggle the selected guardrail in the dashboard with `b`, or via `memory_issue`/config.
@@ -92,7 +98,7 @@ Resolution order (first wins): project `<project>/.opencode/memory/config.json` 
 | `projectCharLimit` | int | 4000 | Total char cap for project entries. |
 | `perEntryCharLimit` | int | 180 | Max chars for a single entry. |
 | `maxEntryLines` | int | 3 | Max lines for a single entry. |
-| `maxInjectChars` | int | 2400 | Budget for the injected snapshot per turn. |
+| `maxInjectChars` | int | 2400 | Budget for the session-static memory block. The per-call turn tail has its own fixed 800-char cap. |
 | `jit` | bool | true | Just-in-time surfacing of entries matching the conversation. |
 | `learnings.maxIndexTitles` | int | 12 | Lesson titles listed in the snapshot index. |
 | `capture.toolErrors` | bool | true | Auto-capture failing tool calls. |
@@ -115,6 +121,7 @@ Project scope (`<project>/.opencode/memory/`): `project.md`, `learnings.md`, `is
 - **RPC methods look "unknown" or the sidebar shows `unavailable`** — a stale server generation is still running: `opencode service restart`.
 - **Two checkouts fight each other** — remove one entry from the `plugins` array in `opencode.json`; a global config entry and the git-installed spec both register the same plugin id.
 - **Worktrees** — a linked `git worktree` resolves to the main worktree root, so all worktrees of a repository share one project memory (by design).
+- **Edited memory mid-turn and the model still sees the old block** — durable edits are deferred to the next user turn so the cached prefix is not rewritten mid-turn. The tool result is the immediate confirmation; send the next message to see it in the block.
 - **Too noisy** — set `guardrails.mode` to `inherit` and toggle individual guardrails, or raise `maxInjectChars`.
 
 ## Development

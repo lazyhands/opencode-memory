@@ -1,14 +1,20 @@
 /**
- * Snapshot builder: the injected MEMORY block.
+ * Snapshot builder: the injected MEMORY blocks.
+ *
+ * Two payloads share one deterministic renderer:
+ *
+ *   - static: the session prefix appended to `system` — GUARDRAILS,
+ *     PERSONALITY, OPEN THREADS, CORRECTIONS, PROJECT, LESSONS, and
+ *     MEMORY PROTOCOL.
+ *   - turn: the per-call tail appended after the messages — RELEVANT THIS
+ *     TURN (pins + JIT) and DISTILL.
+ *
+ * The static block is small enough to stay stable for a whole session; the
+ * turn tail carries everything that changes during a turn so guardrail
+ * writes never rewrite the cached system prefix.
  *
  * Deterministic: the same stores + config + turn context produce a
  * byte-identical block (no timestamps) — safe for provider prompt caching.
- * Sections render in priority order:
- *
- *   1 [GUARDRAILS]  2 [PERSONALITY]  3 [OPEN THREADS]  4 [CORRECTIONS]
- *   5 [PROJECT]     6 [LESSONS]      7 [RELEVANT THIS TURN]  8 [DISTILL]
- *   9 [MEMORY PROTOCOL]
- *
  * Packing reserves the small, high-value sections first (guardrails,
  * corrections, open threads), then the bounded stores, then turn relevance;
  * the static protocol text absorbs the squeeze (full → short → omitted).
@@ -59,10 +65,16 @@ export const PACK_ORDER: readonly SectionName[] = [
   "MEMORY PROTOCOL",
 ]
 
+/** Packing order for the per-call tail. Pins precede JIT inside RELEVANT. */
+export const TURN_PACK_ORDER: readonly SectionName[] = ["RELEVANT THIS TURN", "DISTILL"]
+
 export const MAX_GUARDRAIL_LINES = 6
 export const MAX_THREAD_LINES = 6
 export const MAX_CORRECTION_LINES = 3
 export const LESSON_INDEX_CHAR_BUDGET = 320
+
+/** Fixed budget for the per-call turn tail (the static block uses maxInjectChars). */
+export const TURN_TAIL_CHARS = 800
 
 export const PROTOCOL_FULL = `[MEMORY PROTOCOL] — binding for this session
 - The MEMORY block above is BINDING context: follow its guardrails, open threads and corrections. A correction overrides your priors/training — never emit its "wrong:" variant.
@@ -95,6 +107,8 @@ export interface SnapshotInputs {
   pins?: SnapshotPin[] | undefined
   /** One-line distillation request after a context compaction. */
   distill?: boolean | undefined
+  /** Refs already carried by the static block — omitted from the turn tail. */
+  coveredRefs?: ReadonlySet<string> | undefined
 }
 
 export interface SnapshotSectionInfo {
@@ -255,7 +269,7 @@ function jitMatchLine(match: JitMatch): string {
 function relevantBlock(
   matches: JitMatch[],
   pins: SnapshotPin[],
-  coveredRefs: Set<string>,
+  coveredRefs: ReadonlySet<string>,
 ): SectionBlock | null {
   const items: SectionItem[] = []
   for (const pin of pins) {
@@ -284,20 +298,39 @@ function distillBlock(pending: boolean): SectionBlock | null {
   return { name: "DISTILL", header: "[DISTILL]", items: [{ lines: [DISTILL_LINE], refs: [] }] }
 }
 
-export function buildSections(inputs: SnapshotInputs): SectionBlock[] {
+export type SnapshotScope = "all" | "static" | "turn"
+
+/**
+ * Build section blocks for one payload. `static` omits the turn-only
+ * sections; `turn` omits everything except RELEVANT THIS TURN and DISTILL.
+ */
+export function buildSections(inputs: SnapshotInputs, scope: SnapshotScope = "all"): SectionBlock[] {
   const corrections = inputs.corrections ?? inputs.project.filter((entry) => entry.kind === "correction")
   const projectEntries = inputs.project.filter((entry) => entry.kind !== "correction")
-  const blocks: Array<SectionBlock | null> = [
-    guardrailsBlock(inputs.guardrails),
-    storeBlock("PERSONALITY", inputs.personality, inputs.config.personalityCharLimit, "p"),
-    threadsBlock(inputs.threads),
-    correctionsBlock(corrections),
-    storeBlock("PROJECT", projectEntries, inputs.config.projectCharLimit, "j"),
-    lessonsBlock(inputs.lessons, inputs.config),
-    relevantBlock(inputs.jit ?? [], inputs.pins ?? [], new Set()),
-    distillBlock(inputs.distill ?? false),
-    protocolBlock(inputs.config.protocol),
-  ]
+  const blocks: Array<SectionBlock | null> = []
+
+  if (scope === "all" || scope === "static") {
+    blocks.push(
+      guardrailsBlock(inputs.guardrails),
+      storeBlock("PERSONALITY", inputs.personality, inputs.config.personalityCharLimit, "p"),
+      threadsBlock(inputs.threads),
+      correctionsBlock(corrections),
+      storeBlock("PROJECT", projectEntries, inputs.config.projectCharLimit, "j"),
+      lessonsBlock(inputs.lessons, inputs.config),
+    )
+  }
+
+  if (scope === "all" || scope === "turn") {
+    blocks.push(
+      relevantBlock(inputs.jit ?? [], inputs.pins ?? [], inputs.coveredRefs ?? new Set()),
+      distillBlock(inputs.distill ?? false),
+    )
+  }
+
+  if (scope === "all" || scope === "static") {
+    blocks.push(protocolBlock(inputs.config.protocol))
+  }
+
   return blocks.filter((block): block is SectionBlock => block !== null)
 }
 
@@ -339,18 +372,29 @@ function packSection(section: SectionBlock, budget: number): { packed: PackedSec
   return { packed: { lines, refs }, omitted }
 }
 
-export function buildSnapshot(inputs: SnapshotInputs): Snapshot {
-  const budget = inputs.config.maxInjectChars
-  const sections = new Map(buildSections(inputs).map((section) => [section.name, section]))
+interface RenderOptions {
+  budget: number
+  packOrder: readonly SectionName[]
+  scope: SnapshotScope
+  /**
+   * Repack RELEVANT against the refs already packed in this payload. Only the
+   * legacy all-in-one snapshot needs this; static and turn builders pass
+   * `coveredRefs` into `buildSections` instead.
+   */
+  dedupeRelevant?: boolean | undefined
+}
+
+function renderSnapshot(inputs: SnapshotInputs, options: RenderOptions): Snapshot {
+  const sections = new Map(buildSections(inputs, options.scope).map((section) => [section.name, section]))
   const packed = new Map<SectionName, PackedSection>()
   const truncations: string[] = []
-  let remaining = budget
+  let remaining = options.budget
   let includedCount = 0
 
-  for (const name of PACK_ORDER) {
+  for (const name of options.packOrder) {
     let section = sections.get(name)
     if (!section) continue
-    if (name === "RELEVANT THIS TURN") {
+    if (name === "RELEVANT THIS TURN" && options.dedupeRelevant) {
       // Dedupe against sections that actually got packed, then repack.
       const covered = new Set<string>()
       for (const value of packed.values()) for (const ref of value.refs) covered.add(ref)
@@ -423,6 +467,37 @@ export function buildSnapshot(inputs: SnapshotInputs): Snapshot {
     chars: block.length,
     hash: contentId("s", block),
   }
+}
+
+/** The session-static prefix appended to `system`. */
+export function buildStaticSnapshot(inputs: SnapshotInputs): Snapshot {
+  return renderSnapshot(inputs, {
+    budget: inputs.config.maxInjectChars,
+    packOrder: PACK_ORDER,
+    scope: "static",
+  })
+}
+
+/** The per-call tail appended after the messages. */
+export function buildTurnSnapshot(
+  inputs: SnapshotInputs,
+  options: { budget?: number | undefined } = {},
+): Snapshot {
+  return renderSnapshot(inputs, {
+    budget: options.budget ?? TURN_TAIL_CHARS,
+    packOrder: TURN_PACK_ORDER,
+    scope: "turn",
+  })
+}
+
+/** Legacy all-in-one snapshot (static + turn under one budget). */
+export function buildSnapshot(inputs: SnapshotInputs): Snapshot {
+  return renderSnapshot(inputs, {
+    budget: inputs.config.maxInjectChars,
+    packOrder: PACK_ORDER,
+    scope: "all",
+    dedupeRelevant: true,
+  })
 }
 
 /** Lesson titles helper for callers that need the index outside the block. */

@@ -80,7 +80,7 @@ export const CONFIG_FIELDS: readonly ConfigField[] = [
   { path: "projectCharLimit", type: "int", description: "Project char cap" },
   { path: "perEntryCharLimit", type: "int", description: "Max chars per entry" },
   { path: "maxEntryLines", type: "int", description: "Max lines per entry" },
-  { path: "maxInjectChars", type: "int", description: "Memory block budget" },
+  { path: "maxInjectChars", type: "int", description: "Session memory block budget" },
   { path: "jit", type: "bool", description: "Just-in-time recall" },
   { path: "learnings.maxIndexTitles", type: "int", description: "Index titles" },
   { path: "capture.toolErrors", type: "bool", description: "Capture errors" },

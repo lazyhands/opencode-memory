@@ -7,7 +7,8 @@ import { parseEvents } from "../src/core/audit.ts"
 import { hasCode } from "../src/core/errors.ts"
 import { readGuardrails } from "../src/core/learnings.ts"
 import { serializeGuardrails } from "../src/core/learnings.ts"
-import { guardrail, makeServerFixture, seedStores } from "./helpers.ts"
+import { serializeEntries } from "../src/core/store.ts"
+import { entry, guardrail, makeServerFixture, seedStores } from "./helpers.ts"
 
 // ---------------------------------------------------------------------------
 // Turn extraction
@@ -52,7 +53,7 @@ test("turnContextFromMessages collects only the current turn's text, files and c
 // Injection
 // ---------------------------------------------------------------------------
 
-test("inject builds one turn-stable block, logs it once and emits once", async () => {
+test("inject builds a session-static block plus a per-call turn tail, logs once", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
   const messages = [{ role: "user", id: "msg_1", content: [{ type: "text", text: "how does the auth refresh flow work?" }] }]
@@ -62,24 +63,47 @@ test("inject builds one turn-stable block, logs it once and emits once", async (
   assert.ok(first.block?.includes("[PERSONALITY]"))
   assert.ok(first.block?.includes("[PROJECT]"))
   assert.ok(first.block?.includes("[MEMORY PROTOCOL]"))
-  assert.ok(first.block?.includes("i2"), "fixed thread surfaces via JIT regression watch")
+  assert.ok(!first.block?.includes("[RELEVANT THIS TURN]"), "turn sections stay out of the static prefix")
+  assert.ok(first.turn?.includes("i2"), "fixed thread surfaces via JIT regression watch in the tail")
 
-  // Same turn, messages grew between model calls → byte-identical block.
+  // Same turn, messages grew between model calls → byte-identical payloads.
   const second = await fx.runtime.inject({
     sessionID: "ses_inject",
     messages: [...messages, { role: "assistant", content: [{ type: "text", text: "thinking" }] }],
   })
   assert.equal(second.rebuilt, false)
   assert.equal(second.block, first.block)
+  assert.equal(second.turn, first.turn)
+  assert.equal(second.staticHash, first.staticHash)
+  assert.equal(second.turnHash, first.turnHash)
 
   const events = parseEvents(readFileSync(join(fx.projectDir, "audit.jsonl"), "utf8"))
   const injects = events.filter((event) => event.type === "inject")
   assert.equal(injects.length, 1)
+  assert.equal(typeof injects[0]?.["staticHash"], "string")
+  assert.equal(typeof injects[0]?.["turnHash"], "string")
   assert.equal(fx.events.filter((event) => event.event === "injected").length, 1)
   assert.equal(fx.events.filter((event) => event.event === "changed").length, 0)
 })
 
-test("writes bump the epoch, rebuild the block, and emit changed", async () => {
+test("audit adds a row only when the injected payload changes", async () => {
+  const fx = makeServerFixture()
+  seedStores(fx)
+  const messages = [{ role: "user", id: "msg_audit", content: [{ type: "text", text: "hello" }] }]
+  const injects = (): number =>
+    parseEvents(readFileSync(join(fx.projectDir, "audit.jsonl"), "utf8")).filter((event) => event.type === "inject").length
+
+  await fx.runtime.inject({ sessionID: "ses_audit", messages })
+  await fx.runtime.inject({ sessionID: "ses_audit", messages })
+  assert.equal(injects(), 1, "unchanged payload is logged once per turn")
+
+  fx.runtime.pin("ses_audit", { ref: "g:g9", text: "PIN", reason: "preflight:g9" })
+  await fx.runtime.inject({ sessionID: "ses_audit", messages })
+  await fx.runtime.inject({ sessionID: "ses_audit", messages })
+  assert.equal(injects(), 2, "a changed tail gets one extra row, then settles")
+})
+
+test("static memory writes are deferred to the next turn boundary", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
   const messages = [{ role: "user", id: "msg_w", content: [{ type: "text", text: "hello" }] }]
@@ -87,15 +111,33 @@ test("writes bump the epoch, rebuild the block, and emit changed", async () => {
   assert.equal(first.rebuilt, true)
 
   const loaded = fx.runtime.load(await fx.runtime.resolveWorkspace("ses_writes"))
+  writeFileSync(
+    join(fx.projectDir, "project.md"),
+    serializeEntries(
+      [entry("fact", "The API base URL is http://localhost:3000"), entry("fact", "A brand new static fact")],
+      "project",
+    ),
+  )
   fx.runtime.commit(loaded, "project")
 
-  const after = await fx.runtime.inject({ sessionID: "ses_writes", messages })
-  assert.equal(after.rebuilt, true)
+  // Same turn → the cached prefix survives; the write waits for the boundary.
+  const midTurn = await fx.runtime.inject({ sessionID: "ses_writes", messages })
+  assert.equal(midTurn.rebuilt, false)
+  assert.equal(midTurn.block, first.block)
+  assert.ok(!midTurn.block?.includes("A brand new static fact"))
   assert.equal(fx.events.filter((event) => event.event === "changed").length, 1)
-  assert.equal(fx.events.filter((event) => event.event === "injected").length, 2)
+
+  // New user turn → the static block rebuilds once with the new source.
+  const nextTurn = await fx.runtime.inject({
+    sessionID: "ses_writes",
+    messages: [...messages, { role: "assistant", content: [] }, { role: "user", id: "msg_w2", content: [{ type: "text", text: "next" }] }],
+  })
+  assert.equal(nextTurn.rebuilt, true)
+  assert.ok(nextTurn.block?.includes("A brand new static fact"))
+  assert.notEqual(nextTurn.staticHash, first.staticHash)
 })
 
-test("pins force a rebuild within the turn and are dropped on the next turn", async () => {
+test("pins change only the turn tail and are dropped on the next turn", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
   const messages = [{ role: "user", id: "msg_p", content: [{ type: "text", text: "hello" }] }]
@@ -104,25 +146,28 @@ test("pins force a rebuild within the turn and are dropped on the next turn", as
   const marker = "PINNED-GUARDRAIL-TEXT"
   fx.runtime.pin("ses_pin", { ref: "g:g9", text: marker, reason: "preflight:g9" })
   const pinned = await fx.runtime.inject({ sessionID: "ses_pin", messages })
-  assert.equal(pinned.rebuilt, true)
-  assert.ok(pinned.block?.includes(marker))
-  assert.notEqual(pinned.block, first.block)
+  assert.equal(pinned.rebuilt, false)
+  assert.equal(pinned.block, first.block)
+  assert.ok(pinned.turn?.includes(marker))
+  assert.notEqual(pinned.turnHash, first.turnHash)
 
   // Still the same turn → stable again.
   const stable = await fx.runtime.inject({ sessionID: "ses_pin", messages })
   assert.equal(stable.rebuilt, false)
   assert.equal(stable.block, pinned.block)
+  assert.equal(stable.turn, pinned.turn)
 
-  // New user message → rebuild without the pin.
+  // New user message → pin drops, static prefix stays cached.
   const nextTurn = await fx.runtime.inject({
     sessionID: "ses_pin",
     messages: [...messages, { role: "assistant", content: [] }, { role: "user", id: "msg_q", content: [{ type: "text", text: "hello" }] }],
   })
-  assert.equal(nextTurn.rebuilt, true)
-  assert.ok(!nextTurn.block?.includes(marker))
+  assert.equal(nextTurn.rebuilt, false)
+  assert.equal(nextTurn.block, first.block)
+  assert.ok(!nextTurn.turn?.includes(marker))
 })
 
-test("invalidateBlock forces a rebuild (compaction path)", async () => {
+test("invalidateBlock forces a static rebuild (compaction path)", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
   const messages = [{ role: "user", id: "msg_c", content: [{ type: "text", text: "hello" }] }]
@@ -132,41 +177,52 @@ test("invalidateBlock forces a rebuild (compaction path)", async () => {
   assert.equal(rebuilt.rebuilt, true)
 })
 
-test("noteCompaction requests one distillation pass when autoDistillOnCompact is on", async () => {
+test("noteCompaction puts the distillation request in the tail for one turn", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
   const messages = [{ role: "user", id: "msg_d", content: [{ type: "text", text: "hello" }] }]
   const before = await fx.runtime.inject({ sessionID: "ses_distill", messages })
+  assert.ok(!before.turn?.includes("[DISTILL]"))
   assert.ok(!before.block?.includes("[DISTILL]"))
 
   await fx.runtime.setConfigValue({ scope: "project", key: "autoDistillOnCompact", value: true })
   await fx.runtime.noteCompaction("ses_distill")
   fx.runtime.invalidateBlock("ses_distill")
   const after = await fx.runtime.inject({ sessionID: "ses_distill", messages })
-  assert.ok(after.block?.includes("[DISTILL]"))
+  assert.ok(after.turn?.includes("[DISTILL]"))
+  assert.ok(!after.block?.includes("[DISTILL]"))
 
-  // Same turn → the block carrying the request stays byte-stable.
+  // Same turn → the request stays stable across model calls.
   const stable = await fx.runtime.inject({ sessionID: "ses_distill", messages })
   assert.equal(stable.rebuilt, false)
-  assert.equal(stable.block, after.block)
+  assert.equal(stable.turn, after.turn)
 
   // Next turn → the request is consumed and gone.
   const nextTurn = await fx.runtime.inject({
     sessionID: "ses_distill",
     messages: [...messages, { role: "assistant", content: [] }, { role: "user", id: "msg_e", content: [{ type: "text", text: "next" }] }],
   })
-  assert.ok(!nextTurn.block?.includes("[DISTILL]"))
+  assert.ok(!nextTurn.turn?.includes("[DISTILL]"))
 })
 
-test("config changes rebuild the block even without a new turn", async () => {
+test("config changes are deferred to the next turn boundary", async () => {
   const fx = makeServerFixture()
   seedStores(fx)
   const messages = [{ role: "user", id: "msg_cfg", content: [{ type: "text", text: "hello" }] }]
-  await fx.runtime.inject({ sessionID: "ses_cfg", messages })
+  const first = await fx.runtime.inject({ sessionID: "ses_cfg", messages })
   await fx.runtime.setConfigValue({ scope: "project", key: "protocol", value: "off" })
-  const after = await fx.runtime.inject({ sessionID: "ses_cfg", messages })
-  assert.equal(after.rebuilt, true)
-  assert.ok(!after.block?.includes("[MEMORY PROTOCOL]"))
+
+  const midTurn = await fx.runtime.inject({ sessionID: "ses_cfg", messages })
+  assert.equal(midTurn.rebuilt, false)
+  assert.equal(midTurn.block, first.block)
+  assert.ok(midTurn.block?.includes("[MEMORY PROTOCOL]"))
+
+  const nextTurn = await fx.runtime.inject({
+    sessionID: "ses_cfg",
+    messages: [...messages, { role: "assistant", content: [] }, { role: "user", id: "msg_cfg2", content: [{ type: "text", text: "next" }] }],
+  })
+  assert.equal(nextTurn.rebuilt, true)
+  assert.ok(!nextTurn.block?.includes("[MEMORY PROTOCOL]"))
 })
 
 test("applyToSystem appends once, replaces carried-over blocks, and never duplicates", () => {
@@ -192,6 +248,46 @@ test("applyToSystem appends once, replaces carried-over blocks, and never duplic
   const fresh = [{ type: "text", text: "base" }]
   assert.equal(fx.runtime.applyToSystem("ses_sys", fresh, "BLOCK-C"), true)
   assert.deepEqual(fresh.map((part) => part.text), ["base", "BLOCK-C"])
+})
+
+test("applyToMessages keeps one marked system tail at the end of the messages", () => {
+  const fx = makeServerFixture()
+  type Message = { role?: string; content?: unknown; metadata?: Record<string, unknown> }
+  const messages: Message[] = [{ role: "user", content: [{ type: "text", text: "hi" }] }]
+
+  assert.equal(fx.runtime.applyToMessages("ses_tail", messages, "TAIL-A"), true)
+  assert.equal(messages.length, 2)
+  assert.equal(messages[1]?.role, "system")
+  assert.deepEqual(messages[1]?.metadata, { memory: "turn" })
+
+  // Same block at the end → no change, no duplicate.
+  assert.equal(fx.runtime.applyToMessages("ses_tail", messages, "TAIL-A"), false)
+  assert.equal(messages.length, 2)
+
+  // Changed block → replaced in place.
+  assert.equal(fx.runtime.applyToMessages("ses_tail", messages, "TAIL-B"), true)
+  assert.equal(messages.length, 2)
+  assert.equal((messages[1]?.content as { text: string }[])[0]?.text, "TAIL-B")
+
+  // A message after the tail moves the tail to the end.
+  messages.push({ role: "user", content: [{ type: "text", text: "next" }] })
+  assert.equal(fx.runtime.applyToMessages("ses_tail", messages, "TAIL-C"), true)
+  assert.equal(messages.length, 3)
+  assert.equal(messages[2]?.role, "system")
+  assert.equal((messages[2]?.content as { text: string }[])[0]?.text, "TAIL-C")
+  assert.equal(messages.filter((message) => message.metadata?.["memory"] === "turn").length, 1)
+
+  // Unmarked system messages are never touched.
+  const mixed: Message[] = [
+    { role: "system", content: [{ type: "text", text: "base" }] },
+    { role: "user", content: [] },
+  ]
+  assert.equal(fx.runtime.applyToMessages("ses_tail", mixed, "TAIL-D"), true)
+  assert.equal((mixed[0]?.content as { text: string }[])[0]?.text, "base")
+  assert.equal(mixed.length, 3)
+
+  // Empty tail → no-op.
+  assert.equal(fx.runtime.applyToMessages("ses_tail", mixed, ""), false)
 })
 
 // ---------------------------------------------------------------------------
@@ -339,6 +435,8 @@ test("injectionLog returns newest-first entries with sections and refs, filterab
   assert.equal(only.length, 1)
   assert.equal(only[0]?.sessionID, "ses_log")
   assert.ok((only[0]?.refs ?? []).length > 0, "entry refs captured for the effectiveness join")
+  assert.equal(typeof only[0]?.staticHash, "string")
+  assert.equal(typeof only[0]?.turnHash, "string")
 
   // When JIT fires, the reason map explains why the section was injected.
   const jitEntry = fx.runtime.injectionLog(loaded, { sessionID: "ses_log", limit: 10 })[0]

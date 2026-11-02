@@ -42,9 +42,9 @@ test("preflight warn pins the fix into the next block and audits", async () => {
   assert.equal(result.blocked, false)
   assert.equal(result.guardrail, "g1")
 
-  // The pin lands in the next injected block with reason preflight:g1.
+  // The pin lands in the next injected turn tail with reason preflight:g1.
   const injection = await fx.runtime.inject({ sessionID: "ses_pf", messages: MESSAGE })
-  assert.ok(injection.block?.includes("bun test"))
+  assert.ok(injection.turn?.includes("bun test"))
 
   const events = auditEvents(fx)
   const preflights = events.filter((event) => event.type === "preflight")
@@ -131,9 +131,9 @@ test("captureFailure records the guardrail, audits, and counts reoccurrences aft
   assert.deepEqual(stored[0]?.sessions, ["ses_cap"])
   assert.equal(auditEvents(fx).filter((event) => event.type === "fail").length, 1)
 
-  // The guardrail is now injected (settle-on-write rebuild shows it to the model)…
+  // The guardrail is now pinned into the turn tail (no static rebuild)…
   const injection = await fx.runtime.inject({ sessionID: "ses_cap", messages: MESSAGE })
-  assert.ok(injection.block?.includes("npm test"))
+  assert.ok(injection.turn?.includes("npm test"))
 
   // …so the next failure counts as a reoccurrence after injection.
   await fx.runtime.captureFailure({ sessionID: "ses_cap", tool: "shell", input: { command: "npm test" }, error })
@@ -184,7 +184,7 @@ test("captureFailure coaches with the fix of a matching resolved guardrail", asy
   assert.equal(stored[0]?.fix?.input, "bun test")
 
   const injection = await fx.runtime.inject({ sessionID: "ses_coach", messages: MESSAGE })
-  assert.ok(injection.block?.includes("bun test"))
+  assert.ok(injection.turn?.includes("bun test"))
   const inject = auditEvents(fx).find((event) => event.type === "inject")
   const sections = (inject?.["sections"] ?? []) as { why?: Record<string, string> }[]
   const reasons = sections.flatMap((section) => Object.values(section.why ?? {}))
@@ -236,6 +236,35 @@ test("a recorded failure auto-resolves when the fix succeeds in the same session
   assert.equal(resolves.length, 1)
   assert.equal(resolves[0]?.["ref"], "g:g1")
   assert.equal(resolves[0]?.["fix"], "bun test")
+})
+
+test("guardrail churn touches only the turn tail, never the static prefix", async () => {
+  const fx = makeServerFixture()
+  const first = await fx.runtime.inject({ sessionID: "ses_cache", messages: MESSAGE })
+  assert.equal(first.rebuilt, true)
+  const staticBlock = first.block
+  const staticHash = first.staticHash
+
+  await fx.runtime.captureFailure({
+    sessionID: "ses_cache",
+    tool: "shell",
+    input: { command: "npm test" },
+    error: new Error("command not found"),
+  })
+  const captured = await fx.runtime.inject({ sessionID: "ses_cache", messages: MESSAGE })
+  assert.equal(captured.rebuilt, false)
+  assert.equal(captured.block, staticBlock)
+  assert.equal(captured.staticHash, staticHash)
+  assert.ok(captured.turn?.includes("npm test"))
+  assert.notEqual(captured.turnHash, first.turnHash)
+
+  await fx.runtime.autoResolve({ sessionID: "ses_cache", tool: "shell", input: { command: "bun test" } })
+  const resolved = await fx.runtime.inject({ sessionID: "ses_cache", messages: MESSAGE })
+  assert.equal(resolved.rebuilt, false)
+  assert.equal(resolved.block, staticBlock)
+  assert.equal(resolved.staticHash, staticHash)
+  assert.ok(resolved.turn?.includes("bun test"))
+  assert.notEqual(resolved.turnHash, captured.turnHash)
 })
 
 test("preflight surfacing enables the resolve loop for an open guardrail", async () => {
