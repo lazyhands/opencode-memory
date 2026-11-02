@@ -25,7 +25,7 @@ OpenCode installs straight from git — no npm release needed:
 
 ```sh
 opencode plugin add github:lazyhands/opencode-memory        # latest main
-opencode plugin add github:lazyhands/opencode-memory#v0.2.4 # pinned tag (recommended)
+opencode plugin add github:lazyhands/opencode-memory#v0.2.5 # pinned tag (recommended)
 opencode plugin list                                        # verify: RPC + TUI active
 ```
 
@@ -45,7 +45,7 @@ The first session in a project creates `.opencode/memory/` with the project stor
 
 Using an agent (opencode, Claude Code, …) to set this up? Point it at this repo — these are the instructions it needs:
 
-1. Install: `opencode plugin add github:lazyhands/opencode-memory#v0.2.4` (pin a tag; use `#main` only if the user wants unreleased code).
+1. Install: `opencode plugin add github:lazyhands/opencode-memory#v0.2.5` (pin a tag; use `#main` only if the user wants unreleased code).
 2. Confirm the spec landed in the global config (`~/.config/opencode/opencode.json` → `"plugins"`).
 3. If an opencode background service is already running, restart it so the plugin loads: `opencode service restart`.
 4. Verify: the next session shows a `[MEMORY]` block; the `memory_status` tool (or `/memory` in the TUI) confirms it is live. No npm, no build step.

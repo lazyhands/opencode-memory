@@ -4,6 +4,8 @@ All notable changes to this project. Format follows [Keep a Changelog](https://k
 
 ## [Unreleased]
 
+## [0.2.5] — 2026-11-02
+
 ### Fixed
 
 - **Guardrail writes no longer invalidate the provider prompt cache** — the memory payload is split into a session-static block (appended to the system instructions) and a small per-call turn tail (pins, just-in-time recall, distill). Failed tool calls, auto-resolves, and preflight pins now change only the tail; the tools + system + conversation prefix stays byte-identical for the session. Previously every guardrail write bumped the runtime epoch and rebuilt the whole injected block, which rewrote the top of the prompt and forced a cache miss.
